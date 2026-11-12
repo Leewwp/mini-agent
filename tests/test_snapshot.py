@@ -6,6 +6,7 @@
 - 降级(git 不可用/超时)→ ``ChangeSet.available=False`` + 文件清单。
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -144,3 +145,80 @@ def test_snapshot_respects_target_gitignore(tmp_path):
 
     assert [(c.path, c.status) for c in changes.changes] == [("code.py", "M")]
     assert any(".gitignore" in note for note in changes.notes)
+
+
+# ---------- 切片 C:git 身份兜底 + 降级路径 ----------
+
+
+def test_snapshot_identity_fallback_without_global_git_config(tmp_path, monkeypatch):
+    """CI/干净机器无全局身份:commit 靠 -c user.name/-c user.email 兜底照样成功。"""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)  # 屏蔽 ~/.gitconfig
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")  # 屏蔽 /etc/gitconfig
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("1\n", encoding="utf-8")
+
+    snapshot = ShadowGitSnapshot.start(repo)
+    (repo / "a.txt").write_text("2\n", encoding="utf-8")
+    changes = snapshot.finish()
+
+    assert changes.available
+    assert [(c.path, c.status) for c in changes.changes] == [("a.txt", "M")]
+
+
+def test_snapshot_degrades_when_git_binary_missing(tmp_path):
+    """git 不可用:降级为文件清单对比,available=False 且注明无 diff 凭证。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("1\n", encoding="utf-8")
+    missing_git = str(tmp_path / "no-such-git")
+
+    snapshot = ShadowGitSnapshot.start(repo, git_bin=missing_git)
+    (repo / "a.txt").write_text("changed-content\n", encoding="utf-8")  # 大小变化可测
+    (repo / "new.txt").write_text("n\n", encoding="utf-8")
+    changes = snapshot.finish()
+
+    assert changes.available is False
+    assert changes.degraded_reason == "git_unavailable"
+    assert [(c.path, c.status) for c in changes.changes] == [
+        ("a.txt", "M"),
+        ("new.txt", "A"),
+    ]  # 清单对比:大小变化/新增可测,无行级 diff
+    assert changes.diff_text == ""
+    assert any("无 diff 凭证" in note for note in changes.notes)
+
+
+def test_snapshot_degrades_on_timeout(tmp_path):
+    """仓库过大/命令挂死:超时(可注入的小值)触发降级,不真实长等待。"""
+    slow_git = tmp_path / "slow-git"
+    slow_git.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    slow_git.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("1\n", encoding="utf-8")
+
+    snapshot = ShadowGitSnapshot.start(repo, git_bin=str(slow_git), timeout=0.2)
+    changes = snapshot.finish()
+
+    assert changes.available is False
+    assert changes.degraded_reason == "snapshot_timeout"
+    assert any("无 diff 凭证" in note for note in changes.notes)
+
+
+def test_snapshot_finish_failure_degrades_to_final_listing(tmp_path):
+    """基线成功但结束阶段 git 故障:防御性降级(此刻起的清单即终态,如实呈现)。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("1\n", encoding="utf-8")
+
+    snapshot = ShadowGitSnapshot.start(repo)
+    assert snapshot._degraded_reason is None  # 基线成功
+    broken_git = tmp_path / "broken-git"
+    broken_git.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    broken_git.chmod(0o755)
+    snapshot.git_bin = str(broken_git)  # 公开可注入接缝:模拟结束阶段故障
+    (repo / "b.txt").write_text("2\n", encoding="utf-8")
+    changes = snapshot.finish()
+
+    assert changes.available is False
+    assert changes.degraded_reason == "snapshot_failed"

@@ -373,7 +373,7 @@ class ShadowGitSnapshot:
         try:
             snapshot._start_git()
         except SnapshotDegradeError as exc:
-            snapshot._degrade(str(exc))
+            snapshot._degrade(exc.reason)
         except Exception as exc:  # 防御:凭证失败不能中断主流程
             snapshot._degrade(f"snapshot_failed: {type(exc).__name__}: {exc}")
         return snapshot
@@ -385,7 +385,7 @@ class ShadowGitSnapshot:
         try:
             return self._finish_git()
         except SnapshotDegradeError as exc:
-            self._degrade(str(exc))
+            self._degrade(exc.reason)
             return self._finish_degraded()
         except Exception as exc:  # 防御:同上
             self._degrade(f"snapshot_failed: {type(exc).__name__}: {exc}")
