@@ -38,13 +38,9 @@ DEFAULT_DENY_PATTERNS = (".env", "*.pem", "id_rsa*")
 
 
 def _is_denied(name: str, patterns: tuple[str, ...]) -> bool:
-    for pattern in patterns:
-        if any(ch in pattern for ch in "*?["):
-            if fnmatch.fnmatch(name, pattern):
-                return True
-        elif name == pattern:
-            return True
-    return False
+    # fnmatchcase 下无通配符的 pattern 即全等匹配(.env 精确命中,
+    # .env.example 放行);大小写敏感,与 deny-list 字面语义一致
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
 @dataclass
