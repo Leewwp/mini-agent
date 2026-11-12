@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from mini_agent.providers import ToolCall
+from mini_agent.sandbox import clip_bytes
 from mini_agent.session import SessionLogger
 from mini_agent.tools.base import ToolError, ToolOutput, ToolRegistry
 
@@ -43,11 +44,12 @@ def clip_for_model(
     data = text.encode("utf-8")
     if len(data) <= limit:
         return text, False
-    omitted = len(data) - head - tail
-    clipped = (
-        data[:head].decode("utf-8", errors="ignore")
-        + f"\n…[中间已截断 {omitted} 字节,完整内容见会话日志]…\n"
-        + data[-tail:].decode("utf-8", errors="ignore")
+    clipped = clip_bytes(
+        data,
+        cap=limit,
+        head=head,
+        tail=tail,
+        note="\n…[中间已截断 {omitted} 字节,完整内容见会话日志]…\n",
     )
     return clipped, True
 

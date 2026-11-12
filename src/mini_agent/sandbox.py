@@ -151,6 +151,21 @@ OUTPUT_HEAD_BYTES = 32 * 1024
 OUTPUT_TAIL_BYTES = 32 * 1024
 
 
+def clip_bytes(
+    data: bytes, *, cap: int, head: int, tail: int, note: str
+) -> str:
+    """头尾裁剪共用实现(纯函数):未超 cap 原样解码;超限保头尾,
+    中间以 ``note``(含 ``{omitted}`` 占位)说明省略字节数。"""
+    if len(data) <= cap:
+        return data.decode("utf-8", errors="replace")
+    omitted = len(data) - head - tail
+    return (
+        data[:head].decode("utf-8", errors="ignore")
+        + note.format(omitted=omitted)
+        + data[-tail:].decode("utf-8", errors="ignore")
+    )
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     """一次子进程执行的结果(stdout/stderr 已按上限截断)。"""
@@ -165,15 +180,13 @@ class ProcessResult:
 
 def clip_output(data: bytes, *, cap: int = SUBPROCESS_OUTPUT_CAP) -> str:
     """把输出字节截到头尾各 32KB 并解码(纯函数;超限补中文说明)。"""
-    if len(data) <= cap:
-        return data.decode("utf-8", errors="replace")
-    omitted = len(data) - OUTPUT_HEAD_BYTES - OUTPUT_TAIL_BYTES
-    clipped = (
-        data[:OUTPUT_HEAD_BYTES].decode("utf-8", errors="ignore")
-        + f"\n…[输出已截断 {omitted} 字节]…\n"
-        + data[-OUTPUT_TAIL_BYTES:].decode("utf-8", errors="ignore")
+    return clip_bytes(
+        data,
+        cap=cap,
+        head=OUTPUT_HEAD_BYTES,
+        tail=OUTPUT_TAIL_BYTES,
+        note="\n…[输出已截断 {omitted} 字节]…\n",
     )
-    return clipped
 
 
 def run_subprocess(
