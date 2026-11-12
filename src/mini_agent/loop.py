@@ -306,6 +306,7 @@ class AgentLoop:
         self._usage = _UsageAccumulator()
         self._verification_rejected = False
         self._last_prompt_tokens: int | None = None
+        self._steps = 0  # 已完成计数(中断路径终报用;run() 内同步)
 
     # -- 主循环 --
 
@@ -314,6 +315,7 @@ class AgentLoop:
         stalled_rounds = 0
         steps = 0
         while True:
+            self._steps = steps
             if steps >= self._max_steps:
                 return self._finish_run(FinalState.MAX_STEPS, "steps_exhausted", steps)
             if self._clock() - started > self._timeout_seconds:
@@ -353,14 +355,20 @@ class AgentLoop:
                 return self._finish_run(FinalState.TESTS_FAILED, "verification_failed", steps)
 
     def emergency_error_outcome(self, detail: str) -> RunOutcome:
-        """防御路径:循环应内部消化一切 Provider 错误,此方法兜底意外泄漏。"""
-        return _outcome(
+        """防御路径:循环应内部消化一切 Provider/内部错误,此方法兜底意外泄漏。
+
+        经 ``_finish_run`` 产出——ERROR 终态同样落 ``final_report`` 事件,
+        保证所有终态在 session.jsonl 与终报中都有交代。
+        """
+        return self._finish_run(FinalState.ERROR, "provider_error", self._steps, detail=detail)
+
+    def interrupted_outcome(self) -> RunOutcome:
+        """手动中断(Ctrl+C):如实以 ERROR/interrupted 终结,改动与日志保留。"""
+        return self._finish_run(
             FinalState.ERROR,
-            "provider_error",
-            steps=0,
-            usage=self._usage,
-            model=self._provider.model,
-            detail=detail,
+            "interrupted",
+            self._steps,
+            detail="运行被手动中断(Ctrl+C):已完成的改动与日志全部保留,不自动回滚",
         )
 
     def _finish_run(
