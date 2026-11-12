@@ -333,3 +333,84 @@ def test_run_command_success_does_not_count_as_verification(tmp_path):
     assert outcome.reason == "verification_failed"
     # run_command 的执行没有产生 test_run 事件(不计入验证链)
     assert all(e["type"] != "test_run" or "pytest" in e["command"] for e in events)
+
+
+# ---------------------------------------------------------------------------
+# 用例组 ⑦:单轮工具调用超过 8 个
+# ---------------------------------------------------------------------------
+
+
+def test_more_than_eight_tool_calls_in_one_turn_all_get_results(tmp_path):
+    """单轮 10 个调用:前 8 个按序执行,后 2 个补「未执行」结果——每个 tool_call id 都有结果。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    calls = [
+        {"name": "write_file", "arguments": {"path": f"f{i}.txt", "content": str(i)}}
+        for i in range(10)
+    ]
+    turns = {"turns": [{"tool_calls": calls}, {"tool_calls": [finish_call("failed", "演示")]}]}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=2)
+
+    assert outcome.state == "TESTS_FAILED"  # 轮次本身正常走完
+    step1_results = [
+        e for e in events if e["type"] == "tool_result" and e.get("step") == 1
+    ]
+    assert len(step1_results) == 10  # 没有调用被无声丢弃
+    skipped = [e for e in step1_results if "未执行" in e["content"]]
+    assert len(skipped) == 2 and all("单轮上限" in e["content"] for e in skipped)
+    assert all(e["is_error"] for e in skipped)
+    # 前 8 个真实执行:文件落盘
+    for i in range(8):
+        assert (repo / f"f{i}.txt").read_text(encoding="utf-8") == str(i)
+    assert not (repo / "f8.txt").exists() and not (repo / "f9.txt").exists()
+    # 下一轮请求的消息历史里,10 个 tool_call id 全部有配对 tool 结果
+    step2_request = next(e for e in events if e["type"] == "llm_request" and e["step"] == 2)
+    assistant = next(m for m in step2_request["messages"] if m.get("tool_calls"))
+    assert len(assistant["tool_calls"]) == 10
+    tool_replies = [m for m in step2_request["messages"] if m["role"] == "tool"]
+    assert {m["tool_call_id"] for m in tool_replies} == {
+        c["id"] for c in assistant["tool_calls"]
+    }
+
+
+# ---------------------------------------------------------------------------
+# 用例组 ②:model_stalled(连续 2 轮空转)
+# ---------------------------------------------------------------------------
+
+
+def test_model_stalling_two_rounds_ends_with_error(tmp_path):
+    """连续 2 轮不调用工具也不 finish:第 1 轮注入中文提醒,第 2 轮 ERROR(model_stalled)。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [{"text": "我在想想……"}, {"text": "我还在想……"}]}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=10)
+
+    assert outcome.state == "ERROR"
+    assert outcome.reason == "model_stalled"
+    assert outcome.exit_code == 3
+    assert outcome.steps == 2  # 不空转到 MAX_STEPS
+
+    # 第 1 轮后注入中文提醒 user 消息,出现在第 2 步请求上下文里
+    step2_request = next(e for e in events if e["type"] == "llm_request" and e["step"] == 2)
+    reminders = [
+        m for m in step2_request["messages"] if m["role"] == "user" and "提醒" in m["content"]
+    ]
+    assert len(reminders) == 1 and "未调用任何工具" in reminders[0]["content"]
+
+    # 只发生 2 次 LLM 往返(第 2 次后立即终止,无第 3 次请求)
+    assert len(llm_events(events, "llm_request")) == 2
+
+
+def test_single_idle_round_then_tool_use_resets_stall_counter(tmp_path):
+    """空转 1 轮后恢复调用工具:计数清零,不误杀。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {
+        "turns": [
+            {"text": "我先看看仓库。"},
+            {"tool_calls": [{"name": "list_files", "arguments": {}}]},
+            {"text": "再想想。"},
+            {"tool_calls": [{"name": "list_files", "arguments": {}}]},
+            {"tool_calls": [finish_call("failed", "结束") ]},
+        ]
+    }
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=10)
+    assert outcome.state == "TESTS_FAILED"
+    assert len(llm_events(events, "llm_request")) == 5
