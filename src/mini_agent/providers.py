@@ -10,8 +10,11 @@ Comments 第 3 条 deepseek-flash 实测为准)。
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator, Protocol, runtime_checkable
+from typing import Iterable, Protocol, runtime_checkable
+
+import openai
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +242,135 @@ class LLMProvider(Protocol):
     ) -> LLMResponse: ...
 
 
-def iter_all_events(chunks: Iterable[object]) -> Iterator[ProviderEvent]:
-    for chunk in chunks:
-        yield from chunk_to_events(chunk)
+# ---------------------------------------------------------------------------
+# OpenAI 兼容实现(唯一真实 Provider)
+# ---------------------------------------------------------------------------
+
+
+class ProviderError(Exception):
+    """Provider 调用失败(循环转 ERROR 终态)。"""
+
+
+class ProviderRequestError(ProviderError):
+    """400/401/402/422 等请求错误:不可重试,附可操作提示。"""
+
+    def __init__(self, message: str, status_code: int | None, hint: str):
+        super().__init__(f"{message}\n可操作提示:{hint}")
+        self.status_code = status_code
+        self.hint = hint
+
+
+class ProviderRetryExhausted(ProviderError):
+    """429/5xx/网络错误重试 2 次后仍失败。"""
+
+
+# 请求类错误(不重试)的中文可操作提示
+_FATAL_HINTS = {
+    400: "请求参数被拒绝:请检查模型名与请求内容,或缩小任务后重试",
+    401: "API Key 无效或未授权:请检查环境变量 MINI_AGENT_API_KEY 是否为有效密钥",
+    402: "账户余额不足:请到模型服务商控制台充值后重试",
+    403: "当前 Key 无权访问该模型:请确认套餐或更换 --model",
+    404: "模型不存在:请用 --model 指定有效模型名",
+    422: "请求体无法处理:请检查任务与工具定义的格式",
+}
+
+_UNKNOWN_FATAL_HINT = "请求被服务方拒绝:请检查配置(模型名/密钥/参数)后重试"
+
+
+def classify_provider_error(exc: Exception) -> tuple[str, int | None]:
+    """错误分类:retry = 429/5xx/网络错误;fatal = 其余(含 400/401/402/422)。"""
+    if isinstance(exc, openai.APIConnectionError):
+        # 含 APITimeoutError:网络类错误一律可重试
+        return "retry", None
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        if status == 429 or status >= 500:
+            return "retry", status
+        return "fatal", status
+    return "fatal", None
+
+
+class OpenAICompatProvider:
+    """OpenAI 兼容端点的流式实现(DeepSeek 已实测,智谱/MiniMax best-effort)。
+
+    - stream=True + stream_options.include_usage 取 token 用量(缺失时估算兜底);
+    - thinking 默认显式关闭,--thinking 开启后 reasoning_content 只做展示不回传;
+    - 只对 429/5xx/网络错误指数退避重试 2 次;400/401/402/422 直接转可操作错误。
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 8192,
+        thinking: bool = False,
+        client: object | None = None,
+        retry_delays: tuple[float, ...] = (1.0, 2.0),
+        sleep=time.sleep,
+    ) -> None:
+        self._model = model
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._thinking = thinking
+        self._retry_delays = tuple(retry_delays)
+        self._sleep = sleep
+        if client is not None:
+            self._client = client
+        else:
+            self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def complete(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        on_event=None,
+    ) -> LLMResponse:
+        kwargs: dict = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "extra_body": {"thinking": {"type": "enabled" if self._thinking else "disabled"}},
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        stream = self._create_with_retry(kwargs)
+        events: list[ProviderEvent] = []
+        for chunk in stream:
+            for event in chunk_to_events(chunk):
+                events.append(event)
+                if on_event is not None:
+                    on_event(event)
+        return assemble_response(events)
+
+    def _create_with_retry(self, kwargs: dict):
+        """执行 create,按分类重试;重试次数 = len(retry_delays)。"""
+        total_attempts = len(self._retry_delays) + 1
+        for attempt in range(1, total_attempts + 1):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                kind, status = classify_provider_error(exc)
+                if kind == "fatal":
+                    hint = _FATAL_HINTS.get(status, _UNKNOWN_FATAL_HINT)
+                    raise ProviderRequestError(
+                        f"模型请求被拒绝(HTTP {status}):{exc}", status, hint
+                    ) from exc
+                if attempt == total_attempts:
+                    raise ProviderRetryExhausted(
+                        f"模型服务持续不可用,已重试 {attempt - 1} 次后仍失败"
+                        f"(429/5xx/网络错误):{exc}\n"
+                        "可操作提示:请稍后重试,或用 --model 切换模型"
+                    ) from exc
+                self._sleep(self._retry_delays[attempt - 1])
