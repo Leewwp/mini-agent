@@ -22,7 +22,7 @@ from typing import Callable
 
 from mini_agent.providers import ToolCall
 from mini_agent.session import SessionLogger
-from mini_agent.tools.base import ToolError, ToolRegistry
+from mini_agent.tools.base import ToolError, ToolOutput, ToolRegistry
 
 MAX_TOOL_RESULT_BYTES = 8 * 1024  # 模型上下文的工具结果上限
 CLIP_HEAD_BYTES = 2 * 1024  # 保头
@@ -58,6 +58,8 @@ class ToolResult:
 
     ``content`` 是给模型的(可能截断);``full_content`` 是全量(日志用)。
     ``is_error`` 为 True 时循环把它作为 isError 的 tool_result 回填,不中断。
+    末四个字段是循环语义元数据(来自 ToolOutput),循环只读它们、
+    不按工具名特判。
     """
 
     call_id: str
@@ -67,6 +69,11 @@ class ToolResult:
     is_error: bool = False
     truncated: bool = False
     duration_ms: int = 0
+    terminal: bool = False
+    finish_declared: str | None = None
+    summary: str | None = None
+    verification_passed: bool | None = None
+    unverified_reason: str | None = None
 
 
 class HookChain:
@@ -128,6 +135,28 @@ class ToolExecutor:
         self.hooks = hooks if hooks is not None else HookChain()
         self._clock = clock
 
+    def skip(self, call: ToolCall, *, step: int | None = None, reason: str) -> ToolResult:
+        """不执行调用但补一条结果:每个 tool_call id 都必须有对应结果,
+        否则下一轮请求非法(单轮超上限 / 循环已终止的调用走这里)。"""
+        extra = {"step": step} if step is not None else {}
+        self.logger.emit(
+            "tool_call", call_id=call.id, name=call.name, arguments=call.arguments, **extra
+        )
+        result = ToolResult(
+            call_id=call.id, name=call.name, content="", full_content=reason, is_error=True
+        )
+        self.logger.emit(
+            "tool_result",
+            call_id=call.id,
+            name=call.name,
+            is_error=True,
+            content=reason,
+            truncated=False,
+            duration_ms=0,
+            **extra,
+        )
+        return result
+
     def run(self, call: ToolCall, *, step: int | None = None) -> ToolResult:
         """执行单个工具调用;任何工具侧失败都转 isError 结果,绝不向上抛。"""
         extra = {"step": step} if step is not None else {}
@@ -178,13 +207,27 @@ class ToolExecutor:
                 )
             if not isinstance(args, dict):
                 raise ToolError("工具参数必须是 JSON 对象(键值对)")
-            content = tool.execute(args)
+            output = tool.execute(args)
             duration_ms = int((self._clock() - started) * 1000)
+            if isinstance(output, ToolOutput):  # 带循环语义元数据
+                return ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    content="",
+                    full_content=output.content,
+                    is_error=output.is_error,
+                    duration_ms=duration_ms,
+                    terminal=output.terminal,
+                    finish_declared=output.finish_declared,
+                    summary=output.summary,
+                    verification_passed=output.verification_passed,
+                    unverified_reason=output.unverified_reason,
+                )
             return ToolResult(
                 call_id=call.id,
                 name=call.name,
                 content="",
-                full_content=content,
+                full_content=output,
                 duration_ms=duration_ms,
             )
         except ToolError as exc:
