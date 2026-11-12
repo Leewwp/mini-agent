@@ -1,5 +1,3 @@
-<!-- SKELETON: drafted post-03, finalize in ticket 07 -->
-
 # mini-agent 设计文档(DESIGN)
 
 > 本文档按项目题要求的四要素逐节展开:**任务循环 / 工具执行边界 / 停止条件 /
@@ -7,8 +5,9 @@
 > 「为什么这么设计」。之后是「砍了什么、为什么」「V2 接缝映射」「安全边界与威胁
 > 模型」「可观测性」与「借鉴来源」。
 >
-> 带 TODO 的段落依赖工单 04(git 快照与五要素终报)/ 05(fixture 与彩排)/
-> 06(CI),以对应工单落地为准,工单 07 定稿时校对。
+> 工单 04(git 快照与五要素终报)、05(fixture 与彩排)、06(CI)已全部落地,
+> 本文各节与最终代码逐一核对过;演示数据引用
+> [`fixtures/REHEARSALS.md`](fixtures/REHEARSALS.md) 的真实彩排记录。
 
 ## 0. 定位与红线
 
@@ -158,10 +157,13 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
 退出码 5(`CONFIG_ERROR`)属于 CLI 层配置错误(缺 key、`--repo` 不存在、
 `fake:` 脚本非法等),不是循环终态。所有终态都打印报告并落 `final_report` 事件。
 
-> **TODO(04):** 所有终态的**五要素终报**(终态及原因 / 修改文件与 diff 摘要 /
-> 测试命令与最近一次结果 / 执行步数 / 日志路径 + token 用量与模型名)与影子 git
-> 快照凭证由工单 04 落地;落地后本节补「失败不自动回滚、快照支持手动恢复」的
-> README 级说明要点。
+所有终态共用一个版式的**五要素终报**(`report.py`,工单 04):①终态及原因、
+②修改文件与 diff 摘要、③测试命令与最近一次结果、④执行步数、⑤日志路径
+(外加 token 用量与模型条件)。diff 凭证来自**影子 git 快照**:在会话目录下建
+独立 git 库对目标仓库做运行前后快照(目标仓库零写入),基线含原有未提交改动,
+diff 含 untracked 文件,产物存 `diffs/changes.diff`。**失败不自动回滚**——失败
+时的现场就是证据;需要恢复时用快照 diff 手动应用反向补丁即可。若被测仓库改动
+了测试文件本身,终报会单独提醒(那可能影响验证的可信度)。
 
 ### 为什么这么设计
 
@@ -227,7 +229,7 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
 | 人工审批模式 | 项目要求自主闭环;接缝已留(§6) |
 | 流式工具结果渲染 | 演示收益低,实现成本高 |
 | 上下文压缩(成摘要的主动压缩) | max-steps 20 + 小仓库用不到;V1 只做防御性整组裁剪(§1)与 8KB 截断 |
-| 完全自跟踪 diff(非 git 目录兜底) | stretch,规划任务全部完成后评估;影子 git 快照已覆盖目标仓库非 git 的情况(见 TODO(04)) |
+| 完全自跟踪 diff(非 git 目录兜底) | stretch,规划任务全部完成后评估;影子 git 快照不写入目标仓库,已天然覆盖目标仓库不是 git 仓库的情况 |
 | 发布 PyPI | 项目作品,clone 即用(`uv pip install -e .`);发布流程消耗预算无验收收益 |
 
 ## 6. V2 接缝映射(四个接缝如何支撑审批 / 压缩 / 记忆 / 子 Agent)
@@ -284,7 +286,7 @@ reasoning 与 usage、耗时)、`tool_call`/`tool_result`(日志存全量,模型
 `final_report`。每事件写后 flush,被 kill 时日志仍完整;append-only,永不改写
 ——这是 V2 压缩/记忆的数据地基。
 
-## 9. 借鉴来源(AI 使用声明的素材,声明本体由工单 07 落地)
+## 9. 借鉴来源(AI 使用声明的素材,声明本体见 [AI-USAGE.md](AI-USAGE.md))
 
 - **pi-mono(badlogic/pi-mono)架构调研**:无状态循环函数 + 薄状态封装、
   before/after 钩子与 `{block, reason}` 决策、append-only 事件日志、压缩即投影、
@@ -295,6 +297,8 @@ reasoning 与 usage、耗时)、`tool_call`/`tool_result`(日志存全量,模型
   规律、thinking 开关、`finish_reason=length` 行为——实测结论记录在工单 01
   Comments,是 FakeModel 分片形状的事实基准)。
 - 本项目全程使用 AI 编程助手辅助规划与实现;具体到哪些文件由 AI 生成、哪些由
-  本人改写,将在仓库 AI 使用声明中如实记录。
+  本人改写,见 [AI-USAGE.md](AI-USAGE.md)(AI 使用声明)。
 
-> **TODO(06):** ruff + CI(无 key、无网络出站)落地后,在 §9 附 CI 链接。
+CI 质量门(`.github/workflows/ci.yml`:ruff + pytest,无 key、无网络出站)与
+本仓库的 GitHub Actions 页面:
+`https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml`。
