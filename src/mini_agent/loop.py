@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import enum
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -210,6 +211,7 @@ class AgentLoop:
         self._on_activity = on_activity
         self._stream = stream
         self._usage = _UsageAccumulator()
+        self._verification_rejected = False
 
     # -- 主循环 --
 
@@ -246,15 +248,23 @@ class AgentLoop:
                 )
                 continue
             stalled_rounds = 0
-            self._execute_turn(resp, steps)
+            outcome = self._execute_turn(resp, steps)
+            if outcome is not None:
+                return outcome
+            if self._verification_rejected and steps >= self._max_steps:
+                # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(spec)
+                return self._finish_run(FinalState.TESTS_FAILED, "verification_failed", steps)
 
-    def _finish_run(self, state: FinalState, reason: str, steps: int) -> RunOutcome:
+    def _finish_run(
+        self, state: FinalState, reason: str, steps: int, *, summary: str | None = None
+    ) -> RunOutcome:
         outcome = _outcome(
             state,
             reason,
             steps=steps,
             usage=self._usage,
             model=self._provider.model,
+            summary=summary or "",
         )
         self._logger.emit(
             "final_report",
@@ -301,16 +311,106 @@ class AgentLoop:
 
     # -- 一轮工具执行(≤8,按序;超出补「未执行」结果) --
 
-    def _execute_turn(self, resp: LLMResponse, step: int) -> None:
+    def _execute_turn(self, resp: LLMResponse, step: int) -> RunOutcome | None:
+        """执行本轮全部工具调用;返回 RunOutcome 表示循环就此终止。"""
         for index, call in enumerate(resp.tool_calls):
             if index >= MAX_TOOL_CALLS_PER_TURN:
-                result = self._executor.skip(call, step=step, reason="未执行:超过单轮上限(8 个工具调用)")
+                result = self._executor.skip(
+                    call, step=step, reason="未执行:超过单轮上限(8 个工具调用)"
+                )
             else:
                 self._activity(step, call)
                 result = self._executor.run(call, step=step)
+            if result.terminal:
+                return self._handle_terminal(call, result, step)
             self._messages.append(
                 _tool_message(call.id, result.content, is_error=result.is_error)
             )
+        return None
+
+    # -- 终止语义(只读元数据,不认识具体工具名) --
+
+    def _handle_terminal(self, call: ToolCall, result, step: int) -> RunOutcome | None:
+        declared = result.finish_declared
+        if declared == "failed":
+            # finish(failed):直接终止,如实报告模型认输
+            self._messages.append(_tool_message(call.id, result.content, is_error=False))
+            return self._finish_run(
+                FinalState.TESTS_FAILED, "model_declared_failure", step, summary=result.summary
+            )
+        if declared == "success":
+            return self._handle_finish_success(call, result, step)
+        # terminal 但无声明:按约定未知,拒绝终止并回填(isError)
+        self._messages.append(
+            _tool_message(
+                call.id,
+                f"{result.content}\n终止声明无法识别(finish_declared 缺失),已忽略本次终止请求",
+                is_error=True,
+            )
+        )
+        return None
+
+    def _handle_finish_success(self, call: ToolCall, result, step: int) -> RunOutcome | None:
+        """声明时现场复验:不信任任何历史测试结果,重跑全部 verifier 工具。"""
+        verify_results = self._run_verifiers(step)
+        if not verify_results:
+            self._messages.append(_tool_message(call.id, result.content, is_error=False))
+            return self._finish_run(
+                FinalState.UNVERIFIED, "no_test_command", step, summary=result.summary
+            )
+
+        outputs = "\n\n".join(
+            f"--- {r.name} ---\n{r.content}" for r in verify_results
+        )
+        if all(r.verification_passed is True for r in verify_results):
+            self._messages.append(_tool_message(call.id, result.content, is_error=False))
+            return self._finish_run(
+                FinalState.SUCCESS, "verification_passed", step, summary=result.summary
+            )
+
+        # 无法验证的情形:未配置测试命令 / 测试命令不存在(不是"测试失败")
+        for r in verify_results:
+            if r.verification_passed is None:
+                if r.unverified_reason == "no_test_command":
+                    self._messages.append(_tool_message(call.id, result.content, is_error=False))
+                    return self._finish_run(
+                        FinalState.UNVERIFIED, "no_test_command", step, summary=result.summary
+                    )
+                if r.unverified_reason == "test_command_not_found":
+                    self._messages.append(
+                        _tool_message(call.id, r.content, is_error=True)
+                    )
+                    return self._finish_run(
+                        FinalState.ERROR, "test_command_not_found", step, summary=result.summary
+                    )
+
+        # 复验失败:拒绝本次 finish,输出回填历史,继续修复循环
+        self._verification_rejected = True
+        self._messages.append(
+            _tool_message(
+                call.id,
+                (
+                    "已拒绝 finish(success):现场复验未通过(声明时复验不采信任何历史结果)。"
+                    "请根据以下最新输出继续修复,然后重新验证:\n" + outputs
+                ),
+                is_error=True,
+            )
+        )
+        return None
+
+    def _run_verifiers(self, step: int) -> list:
+        """向 ToolRegistry 取标记为 verifier 的工具重跑(不硬编码工具名)。"""
+        results = []
+        for index, tool in enumerate(self._registry.verifiers()):
+            call = ToolCall(
+                index=0,
+                id=f"verify_{step}_{index}_{secrets.token_hex(3)}",
+                name=tool.name,
+                arguments="{}",
+            )
+            self._activity(step, call)
+            results.append(self._executor.run(call, step=step))
+        return results
 
     def _activity(self, step: int, call: ToolCall) -> None:
         if self._on_activity is not None:

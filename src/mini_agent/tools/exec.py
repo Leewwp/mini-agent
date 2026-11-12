@@ -1,18 +1,20 @@
-"""命令执行工具:run_command(allowlist 约束)/ run_tests(可信命令)。
-
-本票只落执行骨架供 03 复用;完整闭环语义(SUCCESS 复验、终态映射、
-test_command_not_found → ERROR 等)属工单 03,这里不越界。
+"""命令执行工具:run_command(allowlist 约束)/ run_tests(可信命令,verifier)。
 
 权限分层(spec「沙箱」节):
 - run_command:shlex 归一化 → 黑名单 → allowlist,黑名单优先;
+  其执行结果**不计入成功判定**(run_command 不标 is_verifier);
 - run_tests:执行用户显式提供的 ``--test-cmd``,视为可信输入,不经
-  allowlist/黑名单;
-- 两者共同:子进程 env 最小化(API key 不可见)、进程组超时击杀、输出上限。
+  allowlist/黑名单;标记 ``is_verifier``——唯一计入成功判定的工具,
+  结果经 ToolOutput.verification_passed 元数据进入循环;
+- 两者共同:子进程 env 最小化(API key 不可见)、进程组超时击杀、输出上限;
+- run_tests 每次执行落 ``test_run`` 事件(完整 stdout/stderr;模型上下文
+  用截断版),emit 回调由装配方注入,默认不发。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from mini_agent.sandbox import (
     DEFAULT_COMMAND_ALLOWLIST,
@@ -23,7 +25,7 @@ from mini_agent.sandbox import (
     normalize_command,
     run_subprocess,
 )
-from mini_agent.tools.base import Tool, ToolError
+from mini_agent.tools.base import Tool, ToolError, ToolOutput
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
 
@@ -111,7 +113,14 @@ class RunCommandTool:
 
 
 class RunTestsTool:
-    """执行用户预配置的测试命令(可信输入,不经 allowlist/黑名单)。"""
+    """执行用户预配置的测试命令(可信输入,不经 allowlist/黑名单)。
+
+    结果元数据(循环只读元数据):
+    - 退出码 0 且未超时 → verification_passed=True;
+    - 退出码非 0 或超时被击杀 → verification_passed=False(超时也是失败);
+    - 未配置 --test-cmd → is_error + unverified_reason="no_test_command";
+    - 命令不存在/不可执行 → is_error + unverified_reason="test_command_not_found"。
+    """
 
     name = "run_tests"
     description = (
@@ -120,6 +129,7 @@ class RunTestsTool:
         "未配置测试命令时会返回明确的工具错误。"
     )
     parameters = {"type": "object", "properties": {}, "required": []}
+    is_verifier = True
 
     def __init__(
         self,
@@ -127,23 +137,58 @@ class RunTestsTool:
         repo: Path,
         *,
         timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        emit: Callable[..., None] | None = None,
     ) -> None:
         self._test_cmd = test_cmd
         self._repo = Path(repo)
         self._timeout = timeout
+        self._emit = emit
 
-    def execute(self, args: dict) -> str:
+    def execute(self, args: dict) -> ToolOutput:
         if not self._test_cmd:
-            raise ToolError(
-                "未配置测试命令:请用户通过 --test-cmd 提供(如 'pytest -q'),"
-                "或改用 run_command 运行可用命令"
+            return ToolOutput(
+                content=(
+                    "未配置测试命令:请用户通过 --test-cmd 提供(如 'pytest -q'),"
+                    "或改用 run_command 运行可用命令"
+                ),
+                is_error=True,
+                unverified_reason="no_test_command",
             )
         words = _normalize(self._test_cmd)  # 可信输入:只归一化,不经 allowlist/黑名单
-        return _run(words, repo=self._repo, timeout=self._timeout)
+        try:
+            result = run_subprocess(words, cwd=self._repo, timeout=self._timeout)
+        except (FileNotFoundError, PermissionError) as exc:
+            # 测试命令不存在/不可执行是配置级错误,不是"测试失败"
+            return ToolOutput(
+                content=f"测试命令不存在或不可执行:{' '.join(words)}({exc})",
+                is_error=True,
+                unverified_reason="test_command_not_found",
+            )
+        if self._emit is not None:
+            self._emit(
+                "test_run",
+                command=" ".join(result.command),
+                returncode=result.returncode,
+                stdout=result.stdout,  # 完整(仅受子进程输出上限约束),模型上下文用截断版
+                stderr=result.stderr,
+                timed_out=result.timed_out,
+                duration_ms=result.duration_ms,
+            )
+        return ToolOutput(
+            content=_format_process(result),
+            verification_passed=(result.returncode == 0 and not result.timed_out),
+        )
 
 
 def make_exec_tools(
-    repo: Path, *, test_cmd: str | None = None, timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    repo: Path,
+    *,
+    test_cmd: str | None = None,
+    timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    emit: Callable[..., None] | None = None,
 ) -> list[Tool]:
-    """构造命令执行类工具(run_tests 的完整闭环语义在工单 03 接入)。"""
-    return [RunCommandTool(repo, timeout=timeout), RunTestsTool(test_cmd, repo, timeout=timeout)]
+    """构造命令执行类工具;emit 用于落 test_run 事件(由装配方注入)。"""
+    return [
+        RunCommandTool(repo, timeout=timeout),
+        RunTestsTool(test_cmd, repo, timeout=timeout, emit=emit),
+    ]

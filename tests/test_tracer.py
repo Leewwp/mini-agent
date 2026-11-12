@@ -107,12 +107,13 @@ def test_model_blind_overwrite_is_refused_but_execution_continues(tmp_path):
     assert (repo / "fresh.txt").read_text(encoding="utf-8") == "ok"
 
 
-def test_default_registry_exposes_six_tools_with_chinese_descriptions(tmp_path):
+def test_default_registry_exposes_seven_tools_with_chinese_descriptions(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     registry = build_default_registry(repo)
     assert registry.names() == [
         "list_files", "read_file", "write_file", "search", "run_command", "run_tests",
+        "finish",
     ]
     for definition in registry.definitions():
         description = definition["function"]["description"]

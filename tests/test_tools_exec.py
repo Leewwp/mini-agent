@@ -99,32 +99,40 @@ def test_run_command_allowlisted_but_missing_binary_is_tool_error(tmp_path):
         tool.execute({"command": "definitely-not-a-binary-xyz -v"})
 
 
-# ---------- run_tests:可信命令,不经 allowlist ----------
+# ---------- run_tests:可信命令,不经 allowlist;verifier 元数据(工单 03) ----------
 
 
-def test_run_tests_without_test_cmd_is_clear_error(tmp_path):
+def test_run_tests_without_test_cmd_is_clear_unverified_error(tmp_path):
     tool = RunTestsTool(test_cmd=None, repo=tmp_path)
-    with pytest.raises(ToolError, match="未配置测试命令"):
-        tool.execute({})
+    out = tool.execute({})
+    assert out.is_error is True
+    assert "未配置测试命令" in out.content
+    assert out.unverified_reason == "no_test_command"
 
 
 def test_run_tests_runs_user_command_without_allowlist(tmp_path):
     # python/echo 都不在注入的 allowlist 里,证明 run_tests 视用户命令为可信输入
     tool = RunTestsTool(test_cmd=f'"{PY}" -c "print(42)"', repo=tmp_path, timeout=10.0)
     out = tool.execute({})
-    assert "42" in out and "退出码 0" in out
+    assert "42" in out.content and "退出码 0" in out.content
+    assert out.verification_passed is True
+    assert out.is_error is False
 
 
 def test_run_tests_echo_is_allowed(tmp_path):
     tool = RunTestsTool(test_cmd="echo trusted-ok", repo=tmp_path, timeout=10.0)
     out = tool.execute({})
-    assert "trusted-ok" in out
+    assert "trusted-ok" in out.content
 
 
-def test_run_tests_missing_binary_is_tool_error(tmp_path):
+def test_run_tests_missing_binary_is_unverified_not_tests_failed(tmp_path):
+    """命令不存在是配置级错误(unverified_reason),不是"测试失败"。"""
     tool = RunTestsTool(test_cmd="definitely-not-a-binary-xyz", repo=tmp_path)
-    with pytest.raises(ToolError, match="不存在"):
-        tool.execute({})
+    out = tool.execute({})
+    assert out.is_error is True
+    assert "不存在" in out.content
+    assert out.unverified_reason == "test_command_not_found"
+    assert out.verification_passed is None
 
 
 def test_run_tests_reports_failing_tests(tmp_path):
@@ -134,4 +142,5 @@ def test_run_tests_reports_failing_tests(tmp_path):
         timeout=10.0,
     )
     out = tool.execute({})
-    assert "退出码 1" in out and "assert failed" in out
+    assert "退出码 1" in out.content and "assert failed" in out.content
+    assert out.verification_passed is False
