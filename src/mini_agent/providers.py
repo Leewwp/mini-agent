@@ -344,8 +344,12 @@ class OpenAICompatProvider:
             "max_tokens": self._max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "extra_body": {"thinking": {"type": "enabled" if self._thinking else "disabled"}},
         }
+        # thinking extra_body 是 DeepSeek 私有扩展,仅经 M1 在 DeepSeek 实测有效
+        # (事实基准见工单 01 Comments);其他 OpenAI 兼容端点(智谱/MiniMax)
+        # 可能对未知字段直接 400,故仅 deepseek* 模型携带,其余省略。
+        if self._model.startswith("deepseek"):
+            kwargs["extra_body"] = {"thinking": {"type": "enabled" if self._thinking else "disabled"}}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
