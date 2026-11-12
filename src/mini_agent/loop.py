@@ -24,6 +24,7 @@ from __future__ import annotations
 import enum
 import secrets
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -90,29 +91,6 @@ class RunOutcome:
         return EXIT_CODES[self.state]
 
 
-def _outcome(
-    state: FinalState,
-    reason: str,
-    *,
-    steps: int,
-    usage,
-    model: str,
-    summary: str = "",
-    detail: str = "",
-) -> RunOutcome:
-    return RunOutcome(
-        state=state,
-        reason=reason,
-        steps=steps,
-        prompt_tokens=usage.prompt_tokens,
-        completion_tokens=usage.completion_tokens,
-        total_tokens=usage.total_tokens,
-        model=model,
-        summary=summary,
-        detail=detail,
-    )
-
-
 # ---------------------------------------------------------------------------
 # 中文系统提示词(工单 05 定稿:finish 用法 / 先读后写 / 验证优先 /
 # 只有 run_tests 计入成功判定,四条契约在工具描述与系统提示词中各说一遍)
@@ -177,11 +155,11 @@ def _find_interaction_groups(messages: list[dict]) -> list[tuple[int, int]]:
 
 
 def _summary_text(group_count: int, removed_messages: list[dict]) -> str:
-    counts: dict[str, int] = {}
-    for m in removed_messages:
-        for tc in m.get("tool_calls") or []:
-            name = tc.get("function", {}).get("name", "?")
-            counts[name] = counts.get(name, 0) + 1
+    counts = Counter(
+        tc.get("function", {}).get("name", "?")
+        for m in removed_messages
+        for tc in m.get("tool_calls") or []
+    )
     stats = "、".join(f"{name}×{n}" for name, n in counts.items()) or "无"
     return (
         f"[历史裁剪] 为控制上下文长度,已把较早的 {group_count} 轮工具交互"
@@ -267,15 +245,12 @@ class _UsageAccumulator:
     prompt_tokens: int | None = None
     completion_tokens: int = 0
     total_tokens: int = 0
-    estimated: bool = False
 
     def add(self, usage) -> None:
         if usage.prompt_tokens is not None:
             self.prompt_tokens = (self.prompt_tokens or 0) + usage.prompt_tokens
         self.completion_tokens += usage.completion_tokens or 0
         self.total_tokens += usage.total_tokens or 0
-        if usage.estimated:
-            self.estimated = True
 
 
 class AgentLoop:
@@ -387,11 +362,13 @@ class AgentLoop:
         summary: str | None = None,
         detail: str = "",
     ) -> RunOutcome:
-        outcome = _outcome(
-            state,
-            reason,
+        outcome = RunOutcome(
+            state=state,
+            reason=reason,
             steps=steps,
-            usage=self._usage,
+            prompt_tokens=self._usage.prompt_tokens,
+            completion_tokens=self._usage.completion_tokens,
+            total_tokens=self._usage.total_tokens,
             model=self._provider.model,
             summary=summary or "",
             detail=detail,
