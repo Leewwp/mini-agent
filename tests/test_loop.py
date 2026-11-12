@@ -178,3 +178,158 @@ def test_full_fix_cycle_reaches_success(tmp_path):
     assert len(verify_calls) == 1
 
     assert events[-1]["type"] == "final_report" and events[-1]["state"] == "SUCCESS"
+
+
+# ---------------------------------------------------------------------------
+# 用例组 ③:SUCCESS 判定(声明时复验四情形)+ 终态映射
+# ---------------------------------------------------------------------------
+
+GOOD_TEST_REPO_FILES = {
+    "calc.py": "def add(a, b):\n    return a + b\n",
+    "test_calc.py": "from calc import add\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+}
+
+
+def finish_call(result: str, summary: str = "") -> dict:
+    return {"name": "finish", "arguments": {"result": result, "summary": summary}}
+
+
+def llm_events(events, type_: str) -> list:
+    return [e for e in events if e["type"] == type_]
+
+
+def test_tests_pass_but_model_never_finishes_is_not_success(tmp_path):
+    """测试通过但模型不 finish → MAX_STEPS,绝不 SUCCESS。"""
+    repo = make_repo(tmp_path, files=GOOD_TEST_REPO_FILES)
+    turns = {
+        "turns": [
+            {"tool_calls": [{"name": "run_tests", "arguments": {}}]},
+            {"tool_calls": [{"name": "run_tests", "arguments": {}}]},
+        ]
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=2
+    )
+    assert outcome.state == "MAX_STEPS"  # 非 SUCCESS
+    assert outcome.exit_code == 2
+    assert llm_events(events, "final_report")[0]["state"] == "MAX_STEPS"
+
+
+def test_finish_success_reverification_failure_is_rejected_then_exhausts(tmp_path):
+    """finish(success) 复验失败 → 拒绝并回填输出 → 继续;步数耗尽 → TESTS_FAILED(退出码 1)。"""
+    repo = broken_test_repo(tmp_path)
+    turns = {
+        "turns": [
+            {"tool_calls": [{"name": "run_tests", "arguments": {}}]},
+            {"tool_calls": [finish_call("success", "应当被拒绝") ]},
+            {"tool_calls": [finish_call("success", "再试一次") ]},
+        ]
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=3
+    )
+    assert outcome.state == "TESTS_FAILED"
+    assert outcome.reason == "verification_failed"
+    assert outcome.exit_code == 1
+
+    # 拒绝消息回填历史:复验输出出现在第 3 步的模型上下文里
+    step3_request = next(e for e in events if e["type"] == "llm_request" and e["step"] == 3)
+    history_text = json.dumps(step3_request["messages"], ensure_ascii=False)
+    assert "已拒绝 finish(success)" in history_text
+    assert "现场复验未通过" in history_text
+
+    # 复验每次 finish 都现场重跑:模型 1 次 + 两次 finish 各 1 次 = 3 次 test_run
+    assert len(llm_events(events, "test_run")) == 3
+
+
+def test_stale_pass_then_breaking_file_then_finish_success_is_not_success(tmp_path):
+    """测试通过→再写坏文件→finish(success)→复验现场重跑发现失败→非 SUCCESS。
+
+    这是声明时复验防"过期结果"的核心用例:历史里有通过的记录也不采信。
+    """
+    repo = make_repo(tmp_path, files=GOOD_TEST_REPO_FILES)
+    turns = {
+        "turns": [
+            {"tool_calls": [{"name": "run_tests", "arguments": {}}]},  # 通过
+            {"tool_calls": [{"name": "read_file", "arguments": {"path": "calc.py"}}]},
+            {"tool_calls": [{"name": "write_file", "arguments": {"path": "calc.py", "content": BROKEN_CODE}}]},  # 写坏
+            {"tool_calls": [finish_call("success", "测试是过的(历史)") ]},
+        ]
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=4
+    )
+    assert outcome.state != "SUCCESS"
+    assert outcome.state == "TESTS_FAILED" and outcome.reason == "verification_failed"
+    # 复验发生在写坏之后,且是现场重跑(第 4 步的 verifier 调用)
+    verify = [
+        e for e in events
+        if e["type"] == "tool_call" and e["name"] == "run_tests" and e.get("step") == 4
+    ]
+    assert len(verify) == 1
+    assert (repo / "calc.py").read_text(encoding="utf-8") == BROKEN_CODE  # 写坏保留(不自动回滚)
+
+
+def test_finish_success_without_running_tests_is_not_success(tmp_path):
+    """从没跑过测试就 finish(success) → 现场复验仍是唯一判定:失败 → 非 SUCCESS。"""
+    repo = broken_test_repo(tmp_path)
+    turns = {"turns": [{"tool_calls": [finish_call("success", "我好了")]}]}
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=1
+    )
+    assert outcome.state == "TESTS_FAILED"  # 非 SUCCESS
+    # run_tests 只被复验触发(模型从未调用)
+    runs = llm_events(events, "test_run")
+    assert len(runs) == 1 and runs[0]["returncode"] != 0
+
+
+def test_finish_failed_maps_to_tests_failed(tmp_path):
+    """finish(failed) → TESTS_FAILED(model_declared_failure),退出码 1。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [{"tool_calls": [finish_call("failed", "任务无法完成")]}]}
+    outcome, _, _ = run_loop(tmp_path, repo, turns, test_cmd="python3 -m pytest -q")
+    assert outcome.state == "TESTS_FAILED"
+    assert outcome.reason == "model_declared_failure"
+    assert outcome.exit_code == 1
+    assert outcome.summary == "任务无法完成"
+
+
+def test_finish_success_without_test_cmd_is_unverified(tmp_path):
+    """未配置 --test-cmd 时 finish(success) → UNVERIFIED(no_test_command),退出码 6。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [{"tool_calls": [finish_call("success", "完成")]}]}
+    outcome, _, _ = run_loop(tmp_path, repo, turns, test_cmd=None)
+    assert outcome.state == "UNVERIFIED"
+    assert outcome.reason == "no_test_command"
+    assert outcome.exit_code == 6
+
+
+def test_missing_test_command_is_error_not_tests_failed(tmp_path):
+    """测试命令不存在/不可执行 → ERROR(test_command_not_found),退出码 3,不是 TESTS_FAILED。"""
+    repo = make_repo(tmp_path, files=GOOD_TEST_REPO_FILES)
+    turns = {"turns": [{"tool_calls": [finish_call("success", "完成")]}]}
+    outcome, _, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="definitely-not-a-test-runner-xyz"
+    )
+    assert outcome.state == "ERROR"
+    assert outcome.reason == "test_command_not_found"
+    assert outcome.exit_code == 3
+
+
+def test_run_command_success_does_not_count_as_verification(tmp_path):
+    """run_command 执行成功 ≠ 验证:finish(success) 复验只认 run_tests。"""
+    repo = broken_test_repo(tmp_path)
+    turns = {
+        "turns": [
+            # allowlist 内的命令成功退出,但测试实际是失败的
+            {"tool_calls": [{"name": "run_command", "arguments": {"command": "python3 -c \"print('looks fine')\""}}]},
+            {"tool_calls": [finish_call("success", "命令跑通了") ]},
+        ]
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=2
+    )
+    assert outcome.state == "TESTS_FAILED"  # run_command 的成功救不了失败的测试
+    assert outcome.reason == "verification_failed"
+    # run_command 的执行没有产生 test_run 事件(不计入验证链)
+    assert all(e["type"] != "test_run" or "pytest" in e["command"] for e in events)
