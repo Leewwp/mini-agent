@@ -367,14 +367,14 @@ class ShadowGitSnapshot:
         *,
         git_bin: str = "git",
         timeout: float = SNAPSHOT_TIMEOUT_SECONDS,
-    ) -> "ShadowGitSnapshot":
+    ) -> ShadowGitSnapshot:
         """建影子库并记基线 commit;任何失败都降级,绝不向上抛。"""
         snapshot = cls(repo, git_bin=git_bin, timeout=timeout)
         try:
             snapshot._start_git()
         except SnapshotDegradeError as exc:
             snapshot._degrade(exc.reason)
-        except Exception as exc:  # 防御:凭证失败不能中断主流程
+        except Exception as exc:  # noqa: BLE001 —— 防御:凭证失败不能中断主流程,一律降级
             snapshot._degrade(f"snapshot_failed: {type(exc).__name__}: {exc}")
         return snapshot
 
@@ -387,7 +387,7 @@ class ShadowGitSnapshot:
         except SnapshotDegradeError as exc:
             self._degrade(exc.reason)
             return self._finish_degraded()
-        except Exception as exc:  # 防御:同上
+        except Exception as exc:  # noqa: BLE001 —— 防御:同上,凭证失败降级不外抛
             self._degrade(f"snapshot_failed: {type(exc).__name__}: {exc}")
             return self._finish_degraded()
 
@@ -468,8 +468,8 @@ class ShadowGitSnapshot:
             baseline_dirty=self._baseline_dirty,
             baseline_untracked=self._baseline_untracked,
             notes=(
-                "无 diff 凭证:git 不可用或快照超时,已降级为文件清单对比"
-                "(新增/删除/大小变化,无行级 diff)",
+                ("无 diff 凭证:git 不可用或快照超时,已降级为文件清单对比"
+                "(新增/删除/大小变化,无行级 diff)"),
             ),
         )
 
@@ -497,6 +497,7 @@ class ShadowGitSnapshot:
                 text=True,
                 timeout=self.timeout,
                 env=self._env(),
+                check=False,  # 返回码在下方统一判定并转降级
             )
         except FileNotFoundError as exc:
             raise SnapshotDegradeError("git_unavailable", f"git 不可用:{exc}") from exc
@@ -536,6 +537,7 @@ class ShadowGitSnapshot:
                 text=True,
                 timeout=self.timeout,
                 env=self._env(),
+                check=False,  # 非 git 目录返回非零,下方静默跳过
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return

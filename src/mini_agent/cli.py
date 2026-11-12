@@ -16,14 +16,19 @@ from pathlib import Path
 
 from mini_agent.errors import EXIT_CONFIG_ERROR, ConfigError
 from mini_agent.executor import ToolExecutor
-from mini_agent.loop import SYSTEM_PROMPT, AgentLoop, RunOutcome
+from mini_agent.loop import SYSTEM_PROMPT, AgentLoop
 from mini_agent.providers import (
     ProviderError,
     ReasoningDelta,
     TextDelta,
     create_provider,
 )
-from mini_agent.report import build_report, read_last_test_run, render_terminal, write_report
+from mini_agent.report import (
+    build_report,
+    read_last_test_run,
+    render_terminal,
+    write_report,
+)
 from mini_agent.sandbox import ShadowGitSnapshot
 from mini_agent.session import SessionLogger
 from mini_agent.tools import build_default_registry
@@ -185,7 +190,7 @@ def run(config: Config, provider) -> int:
             outcome = loop.emergency_error_outcome(str(exc))
         except KeyboardInterrupt:
             outcome = loop.interrupted_outcome()
-        except Exception as exc:  # 防御:意外内部错误也要有交代(traceback 走 stderr)
+        except Exception as exc:  # noqa: BLE001 —— 防御:意外内部错误也要有交代(traceback 走 stderr)
             traceback.print_exc()
             outcome = loop.emergency_error_outcome(f"内部错误:{type(exc).__name__}: {exc}")
         changes = snapshot.finish()  # 结束快照 + diff 对账(失败自动降级)

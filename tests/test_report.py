@@ -10,33 +10,38 @@
 import json
 
 from mini_agent.loop import FinalState, RunOutcome
-from mini_agent.report import build_report, is_test_file, read_last_test_run, write_report
+from mini_agent.report import (
+    build_report,
+    is_test_file,
+    read_last_test_run,
+    write_report,
+)
 from mini_agent.sandbox import ChangeSet, FileChange
 
 
 def make_outcome(**overrides) -> RunOutcome:
-    base = dict(
-        state=FinalState.SUCCESS,
-        reason="verification_passed",
-        steps=6,
-        prompt_tokens=1200,
-        completion_tokens=340,
-        total_tokens=1540,
-        model="deepseek-flash",
-    )
+    base = {
+        "state": FinalState.SUCCESS,
+        "reason": "verification_passed",
+        "steps": 6,
+        "prompt_tokens": 1200,
+        "completion_tokens": 340,
+        "total_tokens": 1540,
+        "model": "deepseek-flash",
+    }
     base.update(overrides)
     return RunOutcome(**base)
 
 
 def make_changes(**overrides) -> ChangeSet:
-    base = dict(
-        available=True,
-        changes=(
+    base = {
+        "available": True,
+        "changes": (
             FileChange("calc.py", "M", 1, 1),
             FileChange("notes.md", "A", 3, 0),
         ),
-        diff_text="diff --git a/calc.py b/calc.py\n+fixed\n",
-    )
+        "diff_text": "diff --git a/calc.py b/calc.py\n+fixed\n",
+    }
     base.update(overrides)
     return ChangeSet(**base)
 

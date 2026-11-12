@@ -205,7 +205,7 @@ def render_terminal(
         marker = "  ⚠ 测试文件 " if is_test_file(c.path) else "  "
         lines.append(f"{marker}{_format_change(c)}")
     if changes.available:
-        lines.append(f"改动凭证:diffs/changes.diff(影子 git 快照)")
+        lines.append("改动凭证:diffs/changes.diff(影子 git 快照)")
     else:
         reason = changes.degraded_reason or "snapshot_failed"
         lines.append(f"改动凭证:无 diff 凭证(原因:{reason}),文件清单见 report.md")

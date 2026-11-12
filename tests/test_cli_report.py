@@ -8,7 +8,6 @@ import hashlib
 import json
 import subprocess
 
-
 from mini_agent.cli import main, resolve_config, run
 from mini_agent.providers import FakeProvider, FakeTurn
 from mini_agent.sandbox import ChangeSet
@@ -59,7 +58,7 @@ def porcelain(repo) -> list[str]:
 
 def fake_main(monkeypatch, tmp_path, turns, repo, extra_args=()):
     script = tmp_path / "script.json"
-    payload = {"turns": [t if isinstance(t, dict) else t for t in turns]}
+    payload = {"turns": turns}
     script.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     argv = [
         "--repo", str(repo), "--task", "修复 add",
