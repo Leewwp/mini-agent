@@ -1,10 +1,12 @@
 """沙箱护栏(尽力而为,防误伤不防对抗,spec Implementation Decisions)。
 
-本模块承载三类边界,全部供工具层复用:
+本模块承载四类边界,全部供工具层/CLI 复用:
 - 路径围栏 PathFence:所有读写限制在 --repo 内,拒绝 ``..`` 逃逸、
   仓库外绝对路径与指向仓库外的符号链接穿透;
 - 命令检查(工单 02):shlex 归一化 + 危险命令黑名单 + run_command allowlist;
-- 子进程执行(工单 02 骨架):env 最小化、进程组超时击杀、输出上限。
+- 子进程执行(工单 02 骨架):env 最小化、进程组超时击杀、输出上限;
+- 影子 git 快照(工单 04):临时影子库 + ``--work-tree`` 指向目标仓库,
+  目标仓库 HEAD/index/工作区零写入的改动凭证;git 不可用/超时自动降级。
 
 威胁模型:防误伤,不防对抗;OS 级隔离明确不在 V1 范围。
 """
@@ -13,8 +15,10 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -214,3 +218,333 @@ def run_subprocess(
         timed_out=timed_out,
         duration_ms=duration_ms,
     )
+
+
+# ---------------------------------------------------------------------------
+# 影子 git 快照(工单 04):目标仓库零写入的改动凭证
+#
+# recipe(15 分钟 spike 验证):临时目录 ``git --git-dir=SHADOW --work-tree=REPO
+# init``,影子库 info/exclude 排除 ``mini-agent-runs/``;运行前 ``add -A`` +
+# ``commit --allow-empty`` 记基线,结束再 ``add -A`` + ``commit``,diff 两个
+# commit。全程只写影子库(GIT_DIR),目标仓库的 HEAD/index/工作区零写入;
+# 目标目录是否有 .git、是否有未提交改动都不影响(基线把原有状态一并记录,
+# diff 因此只反映本次 agent 的改动;untracked 新文件自动进入清单)。快照
+# 遵循目标仓库 .gitignore 的忽略规则(git 原生语义)。commit 一律带
+# ``-c user.name/-c user.email`` 兜底,干净机器无全局身份也能跑。
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_TIMEOUT_SECONDS = 60.0  # 单条 git 命令的超时(仓库过大时触发降级)
+SNAPSHOT_GIT_USER = ("mini-agent-snapshot", "mini-agent-snapshot@local")
+# 外层环境里会劫持影子库定位的变量,一律剔除(显式 --git-dir/--work-tree 优先,
+# 但 GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY 等仍会覆盖我们指定的位置)
+_GIT_ENV_EXCLUDES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+)
+# 降级文件清单跳过的目录(与工具层 IGNORED_DIRS 语义一致;独立定义,
+# 避免 sandbox ← tools 的反向依赖)
+SNAPSHOT_IGNORED_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", "mini-agent-runs"})
+
+
+class SnapshotDegradeError(Exception):
+    """影子快照失败(git 不可用/命令超时/内部错误);携带降级原因代码。"""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """一个文件在本轮运行中的改动。``status`` 为 git 字母:A/M/D/…。"""
+
+    path: str  # 相对仓库根,posix 风格
+    status: str
+    insertions: int | None  # 二进制文件为 None
+    deletions: int | None
+
+
+@dataclass(frozen=True)
+class ChangeSet:
+    """一次运行的改动凭证。
+
+    ``available=True`` 时 ``diff_text`` 是两个快照 commit 间的完整 unified
+    diff,``changes`` 是解析后的文件清单;``available=False`` 表示降级为文件
+    清单对比(无 diff 凭证,``degraded_reason`` 说明原因)。
+    """
+
+    available: bool
+    changes: tuple[FileChange, ...] = ()
+    diff_text: str = ""
+    degraded_reason: str | None = None
+    baseline_dirty: bool = False  # 基线时目标仓库已有未提交改动(报告注明)
+    baseline_untracked: int = 0
+    notes: tuple[str, ...] = ()
+
+
+def _manifest(repo: Path) -> dict[str, int]:
+    """降级用文件清单:``相对路径 -> 字节数``,跳过忽略目录与符号链接。"""
+    manifest: dict[str, int] = {}
+    stack = [Path(repo)]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            path = Path(entry.path)
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if entry.name in SNAPSHOT_IGNORED_DIRS:
+                    continue
+                stack.append(path)
+            elif entry.is_file(follow_symlinks=False):
+                try:
+                    manifest[path.relative_to(repo).as_posix()] = entry.stat().st_size
+                except OSError:
+                    continue
+    return manifest
+
+
+def _manifest_changes(before: dict[str, int], after: dict[str, int]) -> tuple[FileChange, ...]:
+    """对比两份文件清单:A 新增 / D 删除 / M 大小变化(降级模式无行级 diff)。"""
+    changes = []
+    for path in sorted(set(before) | set(after)):
+        if path not in before:
+            changes.append(FileChange(path, "A", None, None))
+        elif path not in after:
+            changes.append(FileChange(path, "D", None, None))
+        elif before[path] != after[path]:
+            changes.append(FileChange(path, "M", None, None))
+    return tuple(changes)
+
+
+def _parse_numstat_line(line: str) -> tuple[str, int | None, int | None] | None:
+    """解析 ``git diff --numstat --no-renames`` 的一行:<ins>\\t<del>\\t<path>。"""
+    parts = line.split("\t")
+    if len(parts) != 3:
+        return None
+    ins_raw, del_raw, path = parts
+    insertions = None if ins_raw == "-" else int(ins_raw)
+    deletions = None if del_raw == "-" else int(del_raw)
+    return path, insertions, deletions
+
+
+class ShadowGitSnapshot:
+    """目标仓库零写入的前后快照;git 不可用/超时自动降级为文件清单。
+
+    用法:``snapshot = ShadowGitSnapshot.start(repo)`` 在运行开始时调用;
+    agent 改动目标仓库;``changes = snapshot.finish()`` 拿到改动凭证。
+    ``git_bin``/``timeout`` 可注入(测试用);失败绝不向上抛——凭证是尽力而为,
+    主流程不因快照而中断。
+    """
+
+    def __init__(self, repo: Path, *, git_bin: str = "git", timeout: float = SNAPSHOT_TIMEOUT_SECONDS) -> None:
+        self.repo = Path(repo).resolve()
+        self.git_bin = git_bin  # 公开可注入:finish 前替换可模拟结束阶段故障
+        self.timeout = timeout
+        self._shadow_dir: Path | None = None
+        self._baseline: str | None = None
+        self._baseline_dirty = False
+        self._baseline_untracked = 0
+        self._baseline_notes: tuple[str, ...] = ()
+        self._start_manifest: dict[str, int] | None = None
+        self._degraded_reason: str | None = None
+
+    # -- 生命周期 --
+
+    @classmethod
+    def start(
+        cls,
+        repo: Path,
+        *,
+        git_bin: str = "git",
+        timeout: float = SNAPSHOT_TIMEOUT_SECONDS,
+    ) -> "ShadowGitSnapshot":
+        """建影子库并记基线 commit;任何失败都降级,绝不向上抛。"""
+        snapshot = cls(repo, git_bin=git_bin, timeout=timeout)
+        try:
+            snapshot._start_git()
+        except SnapshotDegradeError as exc:
+            snapshot._degrade(str(exc))
+        except Exception as exc:  # 防御:凭证失败不能中断主流程
+            snapshot._degrade(f"snapshot_failed: {type(exc).__name__}: {exc}")
+        return snapshot
+
+    def finish(self) -> ChangeSet:
+        """结束 commit + diff 两个快照;失败降级,绝不向上抛。"""
+        if self._degraded_reason is not None or self._start_manifest is not None:
+            return self._finish_degraded()
+        try:
+            return self._finish_git()
+        except SnapshotDegradeError as exc:
+            self._degrade(str(exc))
+            return self._finish_degraded()
+        except Exception as exc:  # 防御:同上
+            self._degrade(f"snapshot_failed: {type(exc).__name__}: {exc}")
+            return self._finish_degraded()
+
+    # -- git 模式 --
+
+    def _start_git(self) -> None:
+        self._shadow_dir = Path(tempfile.mkdtemp(prefix="mini-agent-shadow-"))
+        self._git(["init", "-q"])
+        exclude = self._shadow_dir / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as fh:
+            fh.write("\nmini-agent-runs/\n")
+        self._record_baseline_state()
+        self._commit("mini-agent baseline snapshot")
+        self._baseline = self._rev("HEAD")
+
+    def _finish_git(self) -> ChangeSet:
+        assert self._shadow_dir is not None and self._baseline is not None
+        self._commit("mini-agent final snapshot")
+        final = self._rev("HEAD")
+        name_status = self._git(["diff", "--no-renames", "--name-status", self._baseline, final])
+        numstat = self._git(["diff", "--no-renames", "--numstat", self._baseline, final])
+        diff_text = self._git(["diff", "--no-renames", self._baseline, final])
+        stats: dict[str, tuple[int | None, int | None]] = {}
+        for line in numstat.splitlines():
+            parsed = _parse_numstat_line(line)
+            if parsed:
+                path, ins, dels = parsed
+                stats[path] = (ins, dels)
+        changes = []
+        for line in name_status.splitlines():
+            if not line.strip():
+                continue
+            status, _, path = line.partition("\t")
+            ins, dels = stats.get(path, (None, None))
+            changes.append(FileChange(path, status, ins, dels))
+        notes = ["快照遵循目标仓库 .gitignore 的忽略规则(被忽略的文件不进入 diff)"]
+        if self._baseline_dirty:
+            notes.append(
+                f"基线包含目标仓库原有的未提交改动(untracked {self._baseline_untracked} 个);"
+                "diff 只反映本次运行的改动"
+            )
+        changeset = ChangeSet(
+            available=True,
+            changes=tuple(changes),
+            diff_text=diff_text,
+            baseline_dirty=self._baseline_dirty,
+            baseline_untracked=self._baseline_untracked,
+            notes=tuple(notes),
+        )
+        self._cleanup()
+        return changeset
+
+    # -- 降级模式 --
+
+    def _degrade(self, reason: str) -> None:
+        """进入降级模式:改用文件清单对比;已建影子库就地清理。"""
+        if reason.startswith("git_unavailable"):
+            code = "git_unavailable"
+        elif reason.startswith("snapshot_timeout"):
+            code = "snapshot_timeout"
+        else:
+            code = "snapshot_failed"
+        if self._start_manifest is None:
+            # 基线阶段就失败:现在取清单作为"起点"(改动可能已发生,如实降级)
+            self._start_manifest = _manifest(self.repo)
+        self._degraded_reason = code
+        self._cleanup()
+
+    def _finish_degraded(self) -> ChangeSet:
+        end_manifest = _manifest(self.repo)
+        start = self._start_manifest or {}
+        changes = _manifest_changes(start, end_manifest)
+        return ChangeSet(
+            available=False,
+            changes=changes,
+            degraded_reason=self._degraded_reason,
+            baseline_dirty=self._baseline_dirty,
+            baseline_untracked=self._baseline_untracked,
+            notes=(
+                "无 diff 凭证:git 不可用或快照超时,已降级为文件清单对比"
+                "(新增/删除/大小变化,无行级 diff)",
+            ),
+        )
+
+    def _cleanup(self) -> None:
+        if self._shadow_dir is not None:
+            shutil.rmtree(self._shadow_dir, ignore_errors=True)
+            self._shadow_dir = None
+
+    # -- git 子进程封装 --
+
+    def _base_args(self) -> list[str]:
+        return [self.git_bin, "--git-dir", str(self._shadow_dir), "--work-tree", str(self.repo)]
+
+    def _env(self) -> dict:
+        """复制当前环境并剔除会劫持影子库定位的 GIT_* 变量。"""
+        return {k: v for k, v in os.environ.items() if k not in _GIT_ENV_EXCLUDES}
+
+    def _git(self, args: list[str]) -> str:
+        """执行影子库 git 命令并返回 stdout(超时/不可用 → SnapshotDegradeError)。"""
+        assert self._shadow_dir is not None
+        try:
+            proc = subprocess.run(
+                self._base_args() + args,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                env=self._env(),
+            )
+        except FileNotFoundError as exc:
+            raise SnapshotDegradeError("git_unavailable", f"git 不可用:{exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise SnapshotDegradeError("snapshot_timeout", f"git 命令超时:{args[0]}") from exc
+        if proc.returncode != 0:
+            raise SnapshotDegradeError(
+                "snapshot_failed", f"git {args[0]} 失败:{proc.stderr.strip()[:500]}"
+            )
+        return proc.stdout
+
+    def _commit(self, message: str) -> None:
+        """add -A + commit(--allow-empty 空改动也成功;-c 身份兜底)。"""
+        self._git(["add", "-A"])
+        self._git(
+            [
+                "-c", f"user.name={SNAPSHOT_GIT_USER[0]}",
+                "-c", f"user.email={SNAPSHOT_GIT_USER[1]}",
+                "commit", "-q", "--allow-empty", "-m", message,
+            ]
+        )
+
+    def _rev(self, rev: str) -> str:
+        return self._git(["rev-parse", rev]).strip()
+
+    def _record_baseline_state(self) -> None:
+        """探测目标仓库基线时是否已有未提交改动/untracked(只读,供报告注明)。
+
+        用目标仓库自己的 git,``--no-optional-locks`` 保证纯只读(不刷新
+        index 的 stat 缓存);目标目录不是 git 仓库时静默跳过(影子库仍完整
+        记录当前状态)。
+        """
+        try:
+            proc = subprocess.run(
+                [self.git_bin, "-C", str(self.repo), "--no-optional-locks", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                env=self._env(),
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+        if proc.returncode != 0:
+            return  # 非 git 目录:零写入前提下无从谈起"未提交改动"
+        for line in proc.stdout.splitlines():
+            if line.startswith("??"):
+                if not line[3:].strip('\"').startswith("mini-agent-runs"):
+                    self._baseline_untracked += 1
+            else:
+                self._baseline_dirty = True
+
