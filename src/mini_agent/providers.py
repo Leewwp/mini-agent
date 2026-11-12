@@ -9,9 +9,13 @@ Comments 第 3 条 deepseek-flash 实测为准)。
 
 from __future__ import annotations
 
+import json
 import re
+import secrets
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable, Protocol, runtime_checkable
 
 import openai
@@ -374,3 +378,201 @@ class OpenAICompatProvider:
                         "可操作提示:请稍后重试,或用 --model 切换模型"
                     ) from exc
                 self._sleep(self._retry_delays[attempt - 1])
+
+
+# ---------------------------------------------------------------------------
+# FakeModel(--model fake:<script.json>):测试与无 key 复现的最高接缝
+# ---------------------------------------------------------------------------
+
+
+class FakeScriptExhausted(ProviderError):
+    """脚本轮次耗尽(正常使用不应触达)。"""
+
+
+@dataclass(frozen=True)
+class FakeTurn:
+    """脚本中的一轮回复。
+
+    - ``tool_calls`` 的 ``arguments`` 允许 dict 或 JSON 字符串;
+    - ``finish_reason`` 可显式覆盖(如 "length" 用于复现截断);
+    - 默认不产生 reasoning(CI 默认路径与演示路径一致)。
+    """
+
+    text: str = ""
+    reasoning: str = ""
+    tool_calls: tuple[dict, ...] = ()
+    finish_reason: str | None = None
+
+
+def load_fake_script(path: str) -> list[FakeTurn]:
+    """装载 fake 脚本;格式 ``{"turns": [{"text":..., "reasoning":...,
+    "tool_calls": [{"name":..., "arguments": {...}}], "finish_reason":...}]} ``。"""
+    from mini_agent.errors import ConfigError
+
+    p = Path(path)
+    if not p.is_file():
+        raise ConfigError(f"FakeModel 脚本不存在:{path}")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"FakeModel 脚本不是合法 JSON:{path}({exc})") from exc
+    turns = data.get("turns") if isinstance(data, dict) else None
+    if not isinstance(turns, list):
+        raise ConfigError(f"FakeModel 脚本缺少 turns 数组:{path}")
+    result: list[FakeTurn] = []
+    for i, raw in enumerate(turns):
+        if not isinstance(raw, dict):
+            raise ConfigError(f"FakeModel 脚本第 {i} 轮不是对象:{path}")
+        tool_calls = raw.get("tool_calls") or []
+        result.append(
+            FakeTurn(
+                text=str(raw.get("text", "")),
+                reasoning=str(raw.get("reasoning", "")),
+                tool_calls=tuple(
+                    {"name": tc.get("name", ""), "arguments": tc.get("arguments", {})}
+                    for tc in tool_calls
+                ),
+                finish_reason=raw.get("finish_reason"),
+            )
+        )
+    return result
+
+
+def _fragments(text: str, size: int) -> list[str]:
+    """把字符串切成固定大小的分片(流式仿真)。"""
+    if not text:
+        return []
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _fake_chunk(*, role=None, content=None, reasoning=None, tool_calls=None, finish_reason=None, usage=None):
+    """构造与 OpenAI 兼容流式分片同形的鸭子类型对象(不依赖 SDK 类型)。"""
+    delta = SimpleNamespace(role=role, content=content, tool_calls=tool_calls, reasoning_content=reasoning)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def fake_chunks_for_turn(
+    fake_turn: FakeTurn,
+    *,
+    messages: list[dict] | None = None,
+) -> list[object]:
+    """把一轮脚本展开成流式分片序列,分片规律与 deepseek-flash 实测一致:
+
+    首片只有 role;reasoning/text 各自分片;每个 tool_call 的首片含
+    index+id+name+空 arguments;其后各调用的参数分片**交错**发出(多调用
+    交错索引);末片带 finish_reason 与确定性 usage。
+    """
+    chunks: list[object] = []
+    chunks.append(_fake_chunk(role="assistant"))
+    for piece in _fragments(fake_turn.reasoning, 3):
+        chunks.append(_fake_chunk(reasoning=piece))
+    for piece in _fragments(fake_turn.text, 3):
+        chunks.append(_fake_chunk(content=piece))
+
+    ids = [f"call_{i}_{secrets.token_hex(3)}" for i in range(len(fake_turn.tool_calls))]
+    args_strings: list[str] = []
+    for i, tc in enumerate(fake_turn.tool_calls):
+        args = tc.get("arguments", "")
+        if not isinstance(args, str):
+            args = json.dumps(args, ensure_ascii=False)
+        args_strings.append(args)
+        chunks.append(
+            _fake_chunk(
+                tool_calls=[
+                    SimpleNamespace(
+                        index=i,
+                        id=ids[i],
+                        function=SimpleNamespace(name=tc.get("name", ""), arguments=""),
+                    )
+                ]
+            )
+        )
+    # 参数增量交错:轮转各调用,模拟并行 tool_calls 的交错分片
+    pending = [_fragments(args, 4) for args in args_strings]
+    while any(pending):
+        for i, frag_list in enumerate(pending):
+            if frag_list:
+                chunks.append(
+                    _fake_chunk(
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=i,
+                                id=None,
+                                function=SimpleNamespace(name=None, arguments=frag_list.pop(0)),
+                            )
+                        ]
+                    )
+                )
+
+    finish = fake_turn.finish_reason or ("tool_calls" if fake_turn.tool_calls else "stop")
+    prompt = sum(len(str(m.get("content") or "")) for m in (messages or []))
+    completion = (
+        estimate_tokens(fake_turn.text)
+        + estimate_tokens(fake_turn.reasoning)
+        + sum(estimate_tokens(a) for a in args_strings)
+    )
+    usage = SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+    )
+    chunks.append(_fake_chunk(finish_reason=finish, usage=usage))
+    return chunks
+
+
+class FakeProvider:
+    """按脚本吐出流式分片的伪 Provider:其上全部真实代码,其下只有网络被替换。"""
+
+    def __init__(self, turns: list[FakeTurn], *, model_label: str = "fake") -> None:
+        self._turns = list(turns)
+        self._label = model_label
+
+    @property
+    def model(self) -> str:
+        return self._label
+
+    def complete(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        on_event=None,
+    ) -> LLMResponse:
+        if not self._turns:
+            raise FakeScriptExhausted("FakeModel 脚本轮次已耗尽:请检查脚本与 max-steps 是否匹配")
+        turn = self._turns.pop(0)
+        events: list[ProviderEvent] = []
+        for chunk in fake_chunks_for_turn(turn, messages=messages):
+            events.extend(chunk_to_events(chunk))
+        for event in events:
+            if on_event is not None:
+                on_event(event)
+        return assemble_response(events)
+
+
+def create_provider(
+    model_spec: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    temperature: float = 0.0,
+    max_tokens: int = 8192,
+    thinking: bool = False,
+    client: object | None = None,
+    retry_delays: tuple[float, ...] = (1.0, 2.0),
+) -> LLMProvider:
+    """按 --model 取值构造 Provider:``fake:<script.json>`` 注入 FakeModel,
+    其余视为 OpenAI 兼容模型名。"""
+    if model_spec.startswith("fake:"):
+        return FakeProvider(load_fake_script(model_spec[len("fake:") :]), model_label=model_spec)
+    return OpenAICompatProvider(
+        model=model_spec,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        thinking=thinking,
+        client=client,
+        retry_delays=retry_delays,
+    )
