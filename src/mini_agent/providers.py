@@ -575,8 +575,6 @@ def create_provider(
     temperature: float = 0.0,
     max_tokens: int = 8192,
     thinking: bool = False,
-    client: object | None = None,
-    retry_delays: tuple[float, ...] = (1.0, 2.0),
 ) -> LLMProvider:
     """按 --model 取值构造 Provider:``fake:<script.json>`` 注入 FakeModel,
     其余视为 OpenAI 兼容模型名。"""
@@ -589,6 +587,4 @@ def create_provider(
         temperature=temperature,
         max_tokens=max_tokens,
         thinking=thinking,
-        client=client,
-        retry_delays=retry_delays,
     )
