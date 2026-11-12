@@ -1,0 +1,50 @@
+# CI 质量门(工单 06):单 job,ruff + pytest。
+#
+# 设计约束(spec「Testing Decisions」·CI 节):
+# - 无 API key:全测试走 FakeModel(--model fake:<script.json>),不引用任何 secrets;
+#   显式置空 MINI_AGENT_API_KEY,证明无 key 环境亦全绿(读者 clone 即信)。
+# - 无网络出站:测试运行期间不访问任何外部服务;依赖安装走 PyPI 属 runner 常规动作。
+# - Python 3.12:满足 pyproject requires-python ">=3.10",与本地开发/uv.lock 一致。
+# - 包管理选 uv(而非 pip):与本地命令完全一致(uv run …),依赖由 uv.lock 锁定,
+#   保证「本地与 CI 结果一致」;--frozen 禁止 CI 内解析新版本。
+# - git 身份:干净 runner 无全局 git 配置,涉及影子 git 快照的测试需要可用的
+#   commit 身份,这里全局兜底(快照实现侧另有 -c user.name/-c user.email 兜底)。
+#
+# 状态徽章(README 由工单 07 定稿时挂载,仓库地址届时校对):
+# ![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v5
+
+      - name: 配置 git 身份(快照测试在干净 runner 上需要)
+        run: |
+          git config --global user.name "mini-agent-ci"
+          git config --global user.email "mini-agent-ci@users.noreply.github.com"
+
+      - name: 安装 uv 并选定 Python 3.12
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖(按 uv.lock 锁定版本,含 dev extra)
+        run: uv sync --frozen --extra dev
+
+      - name: ruff(默认规则集,零豁免配置)
+        run: uv run ruff check .
+
+      - name: pytest(无 key、无网络)
+        env:
+          MINI_AGENT_API_KEY: ""
+        run: uv run pytest -q
