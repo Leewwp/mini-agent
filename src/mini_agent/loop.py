@@ -36,6 +36,7 @@ from mini_agent.errors import (
     EXIT_UNVERIFIED,
 )
 from mini_agent.providers import (
+    FakeScriptExhausted,
     LLMResponse,
     ProviderError,
     ResponseTruncatedError,
@@ -81,6 +82,7 @@ class RunOutcome:
     total_tokens: int | None
     model: str
     summary: str = ""
+    detail: str = ""  # ERROR 时的可操作错误文本
 
     @property
     def exit_code(self) -> int:
@@ -95,6 +97,7 @@ def _outcome(
     usage,
     model: str,
     summary: str = "",
+    detail: str = "",
 ) -> RunOutcome:
     return RunOutcome(
         state=state,
@@ -105,6 +108,7 @@ def _outcome(
         total_tokens=usage.total_tokens,
         model=model,
         summary=summary,
+        detail=detail,
     )
 
 
@@ -320,7 +324,9 @@ class AgentLoop:
             try:
                 resp, steps = self._call_llm(steps)
             except ProviderError as exc:
-                return self._finish_run(FinalState.ERROR, _provider_reason(exc), steps)
+                return self._finish_run(
+                    FinalState.ERROR, _provider_reason(exc), steps, detail=str(exc)
+                )
             steps += 1
 
             self._messages.append(_assistant_message(resp))
@@ -348,8 +354,25 @@ class AgentLoop:
                 # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(spec)
                 return self._finish_run(FinalState.TESTS_FAILED, "verification_failed", steps)
 
+    def emergency_error_outcome(self, detail: str) -> RunOutcome:
+        """防御路径:循环应内部消化一切 Provider 错误,此方法兜底意外泄漏。"""
+        return _outcome(
+            FinalState.ERROR,
+            "provider_error",
+            steps=0,
+            usage=self._usage,
+            model=self._provider.model,
+            detail=detail,
+        )
+
     def _finish_run(
-        self, state: FinalState, reason: str, steps: int, *, summary: str | None = None
+        self,
+        state: FinalState,
+        reason: str,
+        steps: int,
+        *,
+        summary: str | None = None,
+        detail: str = "",
     ) -> RunOutcome:
         outcome = _outcome(
             state,
@@ -358,6 +381,7 @@ class AgentLoop:
             usage=self._usage,
             model=self._provider.model,
             summary=summary or "",
+            detail=detail,
         )
         self._logger.emit(
             "final_report",
@@ -537,4 +561,6 @@ class AgentLoop:
 def _provider_reason(exc: ProviderError) -> str:
     if isinstance(exc, ResponseTruncatedError):
         return "response_truncated"
+    if isinstance(exc, FakeScriptExhausted):
+        return "fake_script_exhausted"
     return "provider_error"

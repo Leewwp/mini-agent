@@ -1,9 +1,8 @@
-"""mini-agent CLI 入口:参数解析、配置装配、Provider 构造与曳光弹运行。
+"""mini-agent CLI 入口:参数解析、配置装配、Provider 构造与完整循环运行。
 
-工单 01 范围 = 最小垂直路径:一次流式调用逐字上屏 + 会话事件日志
-(session_meta / llm_request / llm_response 先行)。完整 Agent 循环、
-工具集与终报在工单 02–04 落地,本文件的接缝(config → provider → run)
-保持不变。
+工单 03 起接通完整 Agent 循环(替换工单 01 的单次调用曳光弹):
+装配 registry / executor / AgentLoop,流式上屏 + 每步工具活动行,
+所有终态打印报告行(终态/原因/步数/token);五要素终报完整版属工单 04。
 """
 
 from __future__ import annotations
@@ -11,25 +10,20 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from mini_agent.errors import (
-    EXIT_CONFIG_ERROR,
-    EXIT_ERROR,
-    EXIT_SUCCESS,
-    ConfigError,
-)
+from mini_agent.errors import EXIT_CONFIG_ERROR, ConfigError
+from mini_agent.executor import ToolExecutor
+from mini_agent.loop import SYSTEM_PROMPT, AgentLoop, RunOutcome
 from mini_agent.providers import (
-    LLMResponse,
     ProviderError,
     ReasoningDelta,
     TextDelta,
-    UsageInfo,
     create_provider,
 )
 from mini_agent.session import SessionLogger
+from mini_agent.tools import build_default_registry
 
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -38,9 +32,7 @@ DEFAULT_MAX_TOKENS = 8192
 DEFAULT_MAX_STEPS = 20
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_CONTEXT_TOKENS = 60000
-
-# 工单 01 的占位系统提示词;完整中文提示词在工单 05 落地
-SYSTEM_PROMPT = "你是 mini-agent,一个本地命令行编码助手。请始终用中文回复。"
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass
@@ -101,6 +93,12 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     repo = Path(args.repo)
     if not repo.is_dir():
         raise ConfigError(f"--repo 路径不存在或不是目录:{args.repo}")
+    if args.max_steps < 1:
+        raise ConfigError(f"--max-steps 必须不小于 1,收到:{args.max_steps}")
+    if args.timeout < 1:
+        raise ConfigError(f"--timeout 必须不小于 1 秒,收到:{args.timeout}")
+    if args.max_context_tokens < 1:
+        raise ConfigError(f"--max-context-tokens 必须为正数,收到:{args.max_context_tokens}")
 
     model = args.model or env.get("MINI_AGENT_MODEL") or DEFAULT_MODEL
     base_url = env.get("MINI_AGENT_BASE_URL") or DEFAULT_BASE_URL
@@ -125,30 +123,6 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     )
 
 
-def _usage_payload(usage: UsageInfo) -> dict:
-    return {
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-        "total_tokens": usage.total_tokens,
-        "estimated": usage.estimated,
-    }
-
-
-def _response_payload(resp: LLMResponse, *, step: int, duration_ms: int) -> dict:
-    return {
-        "step": step,
-        "text": resp.text,
-        "reasoning": resp.reasoning,
-        "tool_calls": [
-            {"index": tc.index, "id": tc.id, "name": tc.name, "arguments": tc.arguments}
-            for tc in resp.tool_calls
-        ],
-        "usage": _usage_payload(resp.usage),
-        "finish_reason": resp.finish_reason,
-        "duration_ms": duration_ms,
-    }
-
-
 def _stream_handler() -> "callable":
     """归一化事件 → 终端:正文逐字上屏(stdout),思考增量走 stderr 仅作展示。"""
 
@@ -163,13 +137,26 @@ def _stream_handler() -> "callable":
     return on_event
 
 
+def _print_report(outcome: RunOutcome, logger: SessionLogger) -> None:
+    """所有终态都打印报告行(五要素完整版属工单 04:diff 摘要等)。"""
+    print()
+    print(f"终态:{outcome.state.value}(原因:{outcome.reason}),退出码 {outcome.exit_code}")
+    if outcome.summary:
+        print(f"模型声明:{outcome.summary}")
+    if outcome.detail:
+        print(f"详情:{outcome.detail}")
+    suffix = "(估算值)" if outcome.total_tokens and outcome.prompt_tokens is None else ""
+    print(
+        f"步数:{outcome.steps};token 用量{suffix}:"
+        f"prompt {outcome.prompt_tokens if outcome.prompt_tokens is not None else '-'} / "
+        f"completion {outcome.completion_tokens} / total {outcome.total_tokens}"
+    )
+    print(f"模型:{outcome.model};会话日志:{logger.path}")
+
+
 def run(config: Config, provider) -> int:
-    """工单 01 曳光弹:一次流式调用 + 会话日志;返回进程退出码。"""
+    """完整循环:装配 registry/executor/AgentLoop,返回进程退出码。"""
     with SessionLogger.create(repo=config.repo) as logger:
-        messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": config.task},
-        ]
         display_base_url = "fake" if config.model.startswith("fake:") else config.base_url
         logger.emit(
             "session_meta",
@@ -181,22 +168,33 @@ def run(config: Config, provider) -> int:
             repo=str(config.repo),
             task=config.task,
             max_steps=config.max_steps,
+            test_cmd=config.test_cmd,
+            timeout_seconds=config.timeout,
         )
-        logger.emit("llm_request", step=1, messages=messages, tools=None)
-        started = time.monotonic()
-        resp = provider.complete(messages, tools=None, on_event=_stream_handler())
-        duration_ms = int((time.monotonic() - started) * 1000)
-        logger.emit("llm_response", **_response_payload(resp, step=1, duration_ms=duration_ms))
-
-    usage = resp.usage
-    print()
-    print(f"会话日志:{logger.path}")
-    suffix = "(估算值)" if usage.estimated else ""
-    print(
-        f"token 用量{suffix}:prompt {usage.prompt_tokens or '-'} / "
-        f"completion {usage.completion_tokens or '-'} / total {usage.total_tokens or '-'}"
-    )
-    return EXIT_SUCCESS
+        registry = build_default_registry(
+            config.repo,
+            test_cmd=config.test_cmd,
+            emit=logger.emit,  # run_tests 的 test_run 事件
+        )
+        executor = ToolExecutor(registry=registry, logger=logger)
+        loop = AgentLoop(
+            provider=provider,
+            executor=executor,
+            logger=logger,
+            system_prompt=SYSTEM_PROMPT,
+            task=config.task,
+            max_steps=config.max_steps,
+            timeout_seconds=float(config.timeout),
+            max_context_tokens=config.max_context_tokens,
+            on_activity=lambda line: print(line, flush=True),  # 每步工具活动行
+            stream=_stream_handler(),
+        )
+        try:
+            outcome = loop.run()
+        except ProviderError as exc:  # 防御:循环应内部消化一切 Provider 错误
+            outcome = loop.emergency_error_outcome(str(exc))
+        _print_report(outcome, logger)
+        return outcome.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -214,11 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"[配置错误] {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
-    try:
-        return run(config, provider)
-    except ProviderError as exc:
-        print(f"[模型错误] {exc}", file=sys.stderr)
-        return EXIT_ERROR
+    return run(config, provider)
 
 
 if __name__ == "__main__":
