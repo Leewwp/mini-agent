@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
+import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # run_command 默认 allowlist:解释器/构建/测试类命令(spec「沙箱」节)。
@@ -132,3 +136,81 @@ def minimal_env(base: dict | None = None) -> dict:
     """复制 base(默认 os.environ)并剔除所有 ``MINI_AGENT_*`` 变量。"""
     env = dict(os.environ if base is None else base)
     return {key: value for key, value in env.items() if not key.startswith("MINI_AGENT_")}
+
+
+# ---------------------------------------------------------------------------
+# 子进程执行骨架(工单 02 落地,03 的 run_tests/run_command 闭环复用)
+# ---------------------------------------------------------------------------
+
+SUBPROCESS_OUTPUT_CAP = 64 * 1024  # 每个流(stdout/stderr)的输出上限
+OUTPUT_HEAD_BYTES = 32 * 1024
+OUTPUT_TAIL_BYTES = 32 * 1024
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """一次子进程执行的结果(stdout/stderr 已按上限截断)。"""
+
+    command: list[str]
+    returncode: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    duration_ms: int
+
+
+def clip_output(data: bytes, *, cap: int = SUBPROCESS_OUTPUT_CAP) -> str:
+    """把输出字节截到头尾各 32KB 并解码(纯函数;超限补中文说明)。"""
+    if len(data) <= cap:
+        return data.decode("utf-8", errors="replace")
+    omitted = len(data) - OUTPUT_HEAD_BYTES - OUTPUT_TAIL_BYTES
+    clipped = (
+        data[:OUTPUT_HEAD_BYTES].decode("utf-8", errors="ignore")
+        + f"\n…[输出已截断 {omitted} 字节]…\n"
+        + data[-OUTPUT_TAIL_BYTES:].decode("utf-8", errors="ignore")
+    )
+    return clipped
+
+
+def run_subprocess(
+    words: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    env_base: dict | None = None,
+) -> ProcessResult:
+    """在 cwd 执行 words(不经 shell):env 最小化、进程组超时击杀、输出上限。
+
+    - ``start_new_session=True`` 使子进程成为新进程组长,超时用 ``killpg``
+      击杀整个进程组(孙子进程不残留);
+    - 超时后 ``timed_out=True``、returncode 为负(被 SIGKILL);
+    - 命令不存在等启动失败向上抛 FileNotFoundError,由调用方转工具错误。
+    """
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        words,
+        cwd=str(cwd),
+        env=minimal_env(env_base),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # pgid == pid(start_new_session)
+        except ProcessLookupError:
+            pass  # 进程恰好已退出
+        out, err = proc.communicate()
+    duration_ms = int((time.monotonic() - started) * 1000)
+    return ProcessResult(
+        command=list(words),
+        returncode=proc.returncode,
+        stdout=clip_output(out or b""),
+        stderr=clip_output(err or b""),
+        timed_out=timed_out,
+        duration_ms=duration_ms,
+    )
