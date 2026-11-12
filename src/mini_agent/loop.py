@@ -130,12 +130,103 @@ SYSTEM_PROMPT = """\
 """
 
 
+MAX_TOOL_CALLS_PER_TURN = 8
+MIN_KEPT_GROUPS = 2  # 历史裁剪时保底保留的最近交互组数
+
+
+# ---------------------------------------------------------------------------
+# 历史裁剪(纯函数):整组替换为摘要,绝不单独删 tool 结果
+# ---------------------------------------------------------------------------
+
+
+def _history_tokens(messages: list[dict]) -> int:
+    """按内容估算消息历史的 token(与 Provider 的估算口径一致)。"""
+    total = 0
+    for m in messages:
+        total += estimate_tokens(m.get("content") or "")
+        for tc in m.get("tool_calls") or []:
+            total += estimate_tokens(tc.get("function", {}).get("arguments") or "")
+    return total
+
+
+def _find_interaction_groups(messages: list[dict]) -> list[tuple[int, int]]:
+    """定位全部交互组:[assistant(tool_calls) + 其后连续 tool 结果] 的 [start, end)。"""
+    groups: list[tuple[int, int]] = []
+    i = 0
+    while i < len(messages):
+        if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
+            start = i
+            i += 1
+            while i < len(messages) and messages[i].get("role") == "tool":
+                i += 1
+            groups.append((start, i))
+        else:
+            i += 1
+    return groups
+
+
+def _summary_text(group_count: int, removed_messages: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    for m in removed_messages:
+        for tc in m.get("tool_calls") or []:
+            name = tc.get("function", {}).get("name", "?")
+            counts[name] = counts.get(name, 0) + 1
+    stats = "、".join(f"{name}×{n}" for name, n in counts.items()) or "无"
+    return (
+        f"[历史裁剪] 为控制上下文长度,已把较早的 {group_count} 轮工具交互"
+        f"({stats})整组省略并替换为本摘要;完整原始内容见会话日志的 "
+        "context_trim 事件(append-only,可还原)。"
+    )
+
+
+def trim_history(
+    messages: list[dict], *, max_prompt_tokens: int, keep_last_groups: int = MIN_KEPT_GROUPS
+) -> tuple[list[dict], list[dict]]:
+    """把最老的交互组整组替换为一条摘要文本,直到估算低于阈值。
+
+    - 触发前的判断由调用方做(阈值用上一响应 usage.prompt_tokens);
+    - 最近 ``keep_last_groups`` 组保底保留,绝不裁穿;
+    - 返回 (新消息列表, 被移除的原始消息);后者进 context_trim 事件供还原。
+    """
+    groups = _find_interaction_groups(messages)
+    if not groups or _history_tokens(messages) <= max_prompt_tokens:
+        return messages, []
+
+    removed_ranges: list[tuple[int, int]] = []
+    for gi, span in enumerate(groups):
+        if len(groups) - gi <= keep_last_groups:
+            break  # 保底:最近 N 组不动
+        removed_ranges.append(span)
+        trial = _rebuild_with_summary(messages, removed_ranges)
+        if _history_tokens(trial) <= max_prompt_tokens:
+            break
+    if not removed_ranges:
+        return messages, []
+    removed_messages = [m for start, end in removed_ranges for m in messages[start:end]]
+    new_messages = _rebuild_with_summary(messages, removed_ranges)
+    return new_messages, removed_messages
+
+
+def _rebuild_with_summary(messages: list[dict], ranges: list[tuple[int, int]]) -> list[dict]:
+    """把给定区间整组移除,在首个区间位置放一条合并摘要。"""
+    drop = {i for start, end in ranges for i in range(start, end)}
+    group_count = len(ranges)
+    removed = [m for i, m in enumerate(messages) if i in drop]
+    first = ranges[0][0]
+    new_messages: list[dict] = []
+    for i, m in enumerate(messages):
+        if i == first:
+            new_messages.append(
+                {"role": "assistant", "content": _summary_text(group_count, removed)}
+            )
+        elif i not in drop:
+            new_messages.append(m)
+    return new_messages
+
+
 # ---------------------------------------------------------------------------
 # AgentLoop
 # ---------------------------------------------------------------------------
-
-MAX_TOOL_CALLS_PER_TURN = 8
-MIN_KEPT_GROUPS = 2  # 历史裁剪时保底保留的最近交互组数
 
 ProviderFactory = Callable[[], object]
 
@@ -212,6 +303,7 @@ class AgentLoop:
         self._stream = stream
         self._usage = _UsageAccumulator()
         self._verification_rejected = False
+        self._last_prompt_tokens: int | None = None
 
     # -- 主循环 --
 
@@ -224,6 +316,7 @@ class AgentLoop:
                 return self._finish_run(FinalState.MAX_STEPS, "steps_exhausted", steps)
             if self._clock() - started > self._timeout_seconds:
                 return self._finish_run(FinalState.TIMEOUT, "deadline_exceeded", steps)
+            self._maybe_trim()
             try:
                 resp, steps = self._call_llm(steps)
             except ProviderError as exc:
@@ -307,7 +400,31 @@ class AgentLoop:
             finish_reason=resp.finish_reason,
             duration_ms=duration_ms,
         )
+        self._last_prompt_tokens = resp.usage.prompt_tokens
         return resp, step
+
+    def _maybe_trim(self) -> None:
+        """上一响应 prompt_tokens 超阈值 → 整组裁剪最老交互并落 context_trim 事件。"""
+        prompt = self._last_prompt_tokens
+        if prompt is None:
+            prompt = _history_tokens(self._messages)
+        if prompt <= self._max_context_tokens:
+            return
+        new_messages, removed = trim_history(
+            self._messages, max_prompt_tokens=self._max_context_tokens
+        )
+        if not removed:
+            return
+        removed_groups = len(_find_interaction_groups(removed))
+        self._logger.emit(
+            "context_trim",
+            trigger_prompt_tokens=prompt,
+            max_context_tokens=self._max_context_tokens,
+            removed_groups=removed_groups,
+            removed_messages=removed,  # 原始消息入日志,append-only 可还原
+            kept_messages=len(new_messages),
+        )
+        self._messages = new_messages
 
     # -- 一轮工具执行(≤8,按序;超出补「未执行」结果) --
 

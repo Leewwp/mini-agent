@@ -506,7 +506,12 @@ def fake_chunks_for_turn(
                 )
 
     finish = fake_turn.finish_reason or ("tool_calls" if fake_turn.tool_calls else "stop")
-    prompt = sum(len(str(m.get("content") or "")) for m in (messages or []))
+    # prompt 估算口径与真实 API 一致:content 与 tool_calls 的 arguments 都计入
+    prompt = 0
+    for m in messages or []:
+        prompt += len(str(m.get("content") or ""))
+        for tc in m.get("tool_calls") or []:
+            prompt += len(str(tc.get("function", {}).get("arguments") or ""))
     completion = (
         estimate_tokens(fake_turn.text)
         + estimate_tokens(fake_turn.reasoning)
