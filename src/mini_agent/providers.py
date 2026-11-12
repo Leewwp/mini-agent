@@ -13,7 +13,7 @@ import json
 import re
 import secrets
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -246,7 +246,7 @@ class LLMProvider(Protocol):
         messages: list[dict],
         *,
         tools: list[dict] | None = None,
-        on_event: callable | None = None,  # type: ignore[valid-type]
+        on_event: Callable[[ProviderEvent], None] | None = None,
     ) -> LLMResponse: ...
 
 
