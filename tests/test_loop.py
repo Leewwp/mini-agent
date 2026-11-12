@@ -414,3 +414,74 @@ def test_single_idle_round_then_tool_use_resets_stall_counter(tmp_path):
     outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=10)
     assert outcome.state == "TESTS_FAILED"
     assert len(llm_events(events, "llm_request")) == 5
+
+
+# ---------------------------------------------------------------------------
+# 用例组 ②:整体超时 TIMEOUT 与 API 错误 ERROR(可注入时钟,禁止真实等待)
+# ---------------------------------------------------------------------------
+
+
+class FastFakeClock:
+    """每次读时钟推进 fixed 秒:毫秒级真实耗时内走完任意长的虚拟时间。"""
+
+    def __init__(self, step_seconds: float = 10.0) -> None:
+        self.step_seconds = step_seconds
+        self.elapsed = 0.0
+
+    def __call__(self) -> float:
+        self.elapsed += self.step_seconds
+        return self.elapsed
+
+
+def test_deadline_exceeded_returns_timeout_without_real_waiting(tmp_path):
+    """整体超时 → TIMEOUT(dealine_exceeded),退出码 4;时钟全注入,无真实等待。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [{"tool_calls": [{"name": "list_files", "arguments": {}}]}] * 5}
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, max_steps=10, timeout_seconds=25.0, clock=FastFakeClock(10.0)
+    )
+    assert outcome.state == "TIMEOUT"
+    assert outcome.reason == "deadline_exceeded"
+    assert outcome.exit_code == 4
+    assert 1 <= outcome.steps < 10  # 在若干步后触发,而非耗尽步数
+    assert llm_events(events, "final_report")[0]["state"] == "TIMEOUT"
+
+
+class FailingProvider:
+    """按脚本抛 ProviderError 的伪 Provider(重试语义属 01 的 provider 单测)。"""
+
+    def __init__(self, error) -> None:
+        self.error = error
+        self.calls = 0
+
+    @property
+    def model(self) -> str:
+        return "fake-failing"
+
+    def complete(self, messages, *, tools=None, on_event=None):
+        self.calls += 1
+        raise self.error
+
+
+def test_provider_retry_exhausted_maps_to_error_terminal(tmp_path):
+    """429/5xx/网络错误重试 2 次后仍失败(provider 已重试)→ 循环 ERROR,退出码 3。"""
+    from mini_agent.providers import ProviderRetryExhausted
+
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    provider = FailingProvider(ProviderRetryExhausted("模型服务持续不可用,已重试 2 次后仍失败"))
+    outcome, events, _ = run_loop(tmp_path, repo, None, behaviors=provider)
+    assert outcome.state == "ERROR"
+    assert outcome.reason == "provider_error"
+    assert outcome.exit_code == 3
+    assert provider.calls == 1
+    assert llm_events(events, "final_report")[0]["state"] == "ERROR"
+
+
+def test_provider_request_error_maps_to_error_terminal(tmp_path):
+    """400/401 等请求错误不重试,直接 ERROR(循环级映射)。"""
+    from mini_agent.providers import ProviderRequestError
+
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    provider = FailingProvider(ProviderRequestError("模型请求被拒绝(HTTP 401)", 401, "检查 key"))
+    outcome, _, _ = run_loop(tmp_path, repo, None, behaviors=provider)
+    assert outcome.state == "ERROR" and outcome.exit_code == 3
