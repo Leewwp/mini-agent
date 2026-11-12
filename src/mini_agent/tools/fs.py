@@ -20,8 +20,10 @@ from mini_agent.sandbox import PathFence
 from mini_agent.tools.base import Tool, ToolError
 from mini_agent.tools.descriptions import ZH_DESCRIPTIONS
 
-# 忽略目录集(spec「工具集」节)
-IGNORED_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", "mini-agent-runs"})
+# 忽略目录集(spec「工具集」节;与快照层 SNAPSHOT_IGNORED_DIRS 语义一致)
+IGNORED_DIRS = frozenset(
+    {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "mini-agent-runs"}
+)
 
 # 上限(spec 钉死的默认值)
 LIST_MAX_DEPTH = 8
@@ -36,13 +38,9 @@ DEFAULT_DENY_PATTERNS = (".env", "*.pem", "id_rsa*")
 
 
 def _is_denied(name: str, patterns: tuple[str, ...]) -> bool:
-    for pattern in patterns:
-        if any(ch in pattern for ch in "*?["):
-            if fnmatch.fnmatch(name, pattern):
-                return True
-        elif name == pattern:
-            return True
-    return False
+    # fnmatchcase 下无通配符的 pattern 即全等匹配(.env 精确命中,
+    # .env.example 放行);大小写敏感,与 deny-list 字面语义一致
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
 @dataclass

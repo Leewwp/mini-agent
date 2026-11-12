@@ -131,6 +131,27 @@ def test_snapshot_excludes_mini_agent_runs_dir(tmp_path):
     assert [(c.path, c.status) for c in changes.changes] == [("code.py", "M")]
 
 
+def test_snapshot_excludes_pycache_and_pytest_cache_noise(tmp_path):
+    """无 .gitignore 的目标仓库:pytest 副产物(__pycache__/*.pyc、.pytest_cache/)
+    运行期出现在仓库内也不入 diff 与修改文件清单(A2:防噪声稀释改测试警报)。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+
+    snapshot = ShadowGitSnapshot.start(repo)
+    (repo / "code.py").write_text("x = 2\n", encoding="utf-8")  # agent 唯一改动
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "code.cpython-312.pyc").write_bytes(b"\x00pyc")
+    (repo / "tests" / "__pycache__").mkdir(parents=True)
+    (repo / "tests" / "__pycache__" / "test_x.cpython-312.pyc").write_bytes(b"\x00pyc")
+    (repo / ".pytest_cache" / "v" / "cache").mkdir(parents=True)
+    (repo / ".pytest_cache" / "v" / "cache" / "lastfailed").write_text("{}\n", encoding="utf-8")
+    changes = snapshot.finish()
+
+    assert [(c.path, c.status) for c in changes.changes] == [("code.py", "M")]
+    assert "pyc" not in changes.diff_text
+
+
 def test_snapshot_respects_target_gitignore(tmp_path):
     """目标目录有 .gitignore:遵循其忽略规则(git 原生语义,被忽略的新文件不入 diff)。"""
     repo = tmp_path / "repo"
@@ -176,6 +197,11 @@ def test_snapshot_degrades_when_git_binary_missing(tmp_path):
     snapshot = ShadowGitSnapshot.start(repo, git_bin=missing_git)
     (repo / "a.txt").write_text("changed-content\n", encoding="utf-8")  # 大小变化可测
     (repo / "new.txt").write_text("n\n", encoding="utf-8")
+    # pytest 副产物:降级清单同样排除(与 git 模式 info/exclude 语义一致)
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"\x00pyc")
+    (repo / ".pytest_cache").mkdir()
+    (repo / ".pytest_cache" / "CACHEDIR.TAG").write_text("x\n", encoding="utf-8")
     changes = snapshot.finish()
 
     assert changes.available is False
@@ -183,7 +209,7 @@ def test_snapshot_degrades_when_git_binary_missing(tmp_path):
     assert [(c.path, c.status) for c in changes.changes] == [
         ("a.txt", "M"),
         ("new.txt", "A"),
-    ]  # 清单对比:大小变化/新增可测,无行级 diff
+    ]  # 清单对比:大小变化/新增可测,无行级 diff;pyc/缓存噪声不入清单
     assert changes.diff_text == ""
     assert any("无 diff 凭证" in note for note in changes.notes)
 

@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from mini_agent.providers import ToolCall
+from mini_agent.sandbox import clip_bytes
 from mini_agent.session import SessionLogger
 from mini_agent.tools.base import ToolError, ToolOutput, ToolRegistry
 
@@ -43,11 +44,12 @@ def clip_for_model(
     data = text.encode("utf-8")
     if len(data) <= limit:
         return text, False
-    omitted = len(data) - head - tail
-    clipped = (
-        data[:head].decode("utf-8", errors="ignore")
-        + f"\n…[中间已截断 {omitted} 字节,完整内容见会话日志]…\n"
-        + data[-tail:].decode("utf-8", errors="ignore")
+    clipped = clip_bytes(
+        data,
+        cap=limit,
+        head=head,
+        tail=tail,
+        note="\n…[中间已截断 {omitted} 字节,完整内容见会话日志]…\n",
     )
     return clipped, True
 
@@ -64,8 +66,8 @@ class ToolResult:
 
     call_id: str
     name: str
-    content: str
     full_content: str
+    content: str = ""  # 给模型的(可能截断);run() 统一从 full_content 裁剪回填
     is_error: bool = False
     truncated: bool = False
     duration_ms: int = 0
@@ -135,44 +137,47 @@ class ToolExecutor:
         self.hooks = hooks if hooks is not None else HookChain()
         self._clock = clock
 
+    def _emit_call(self, call: ToolCall, extra: dict) -> None:
+        self.logger.emit(
+            "tool_call", call_id=call.id, name=call.name, arguments=call.arguments, **extra
+        )
+
+    def _emit_result(self, result: ToolResult, extra: dict) -> None:
+        self.logger.emit(
+            "tool_result",
+            call_id=result.call_id,
+            name=result.name,
+            is_error=result.is_error,
+            content=result.full_content,  # 日志存全量
+            truncated=result.truncated,
+            duration_ms=result.duration_ms,
+            **extra,
+        )
+
     def skip(self, call: ToolCall, *, step: int | None = None, reason: str) -> ToolResult:
         """不执行调用但补一条结果:每个 tool_call id 都必须有对应结果,
         否则下一轮请求非法(单轮超上限 / 循环已终止的调用走这里)。"""
         extra = {"step": step} if step is not None else {}
-        self.logger.emit(
-            "tool_call", call_id=call.id, name=call.name, arguments=call.arguments, **extra
-        )
+        self._emit_call(call, extra)
         result = ToolResult(
-            call_id=call.id, name=call.name, content="", full_content=reason, is_error=True
-        )
-        self.logger.emit(
-            "tool_result",
             call_id=call.id,
             name=call.name,
+            content=reason,  # 回执原因必须到达模型(短定长字符串,无需裁剪)
+            full_content=reason,
             is_error=True,
-            content=reason,
-            truncated=False,
-            duration_ms=0,
-            **extra,
         )
+        self._emit_result(result, extra)
         return result
 
     def run(self, call: ToolCall, *, step: int | None = None) -> ToolResult:
         """执行单个工具调用;任何工具侧失败都转 isError 结果,绝不向上抛。"""
         extra = {"step": step} if step is not None else {}
-        self.logger.emit(
-            "tool_call",
-            call_id=call.id,
-            name=call.name,
-            arguments=call.arguments,
-            **extra,
-        )
+        self._emit_call(call, extra)
         decision = self.hooks.before_tool_call(call)
         if decision["block"]:
             result = ToolResult(
                 call_id=call.id,
                 name=call.name,
-                content="",
                 full_content=f"工具调用被拦截:{decision['reason'] or '未说明原因'}",
                 is_error=True,
             )
@@ -181,16 +186,7 @@ class ToolExecutor:
         result = self.hooks.after_tool_call(call, result)
         clipped, truncated = clip_for_model(result.full_content)
         final = replace(result, content=clipped, truncated=truncated)
-        self.logger.emit(
-            "tool_result",
-            call_id=call.id,
-            name=call.name,
-            is_error=final.is_error,
-            content=final.full_content,  # 日志存全量
-            truncated=final.truncated,
-            duration_ms=final.duration_ms,
-            **extra,
-        )
+        self._emit_result(final, extra)
         return final
 
     def _execute(self, call: ToolCall) -> ToolResult:
@@ -213,7 +209,6 @@ class ToolExecutor:
                 return ToolResult(
                     call_id=call.id,
                     name=call.name,
-                    content="",
                     full_content=output.content,
                     is_error=output.is_error,
                     duration_ms=duration_ms,
@@ -226,7 +221,6 @@ class ToolExecutor:
             return ToolResult(
                 call_id=call.id,
                 name=call.name,
-                content="",
                 full_content=output,
                 duration_ms=duration_ms,
             )
@@ -242,7 +236,6 @@ class ToolExecutor:
         return ToolResult(
             call_id=call.id,
             name=call.name,
-            content="",
             full_content=message,
             is_error=True,
             duration_ms=duration_ms,

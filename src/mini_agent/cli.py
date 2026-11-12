@@ -32,7 +32,7 @@ from mini_agent.report import (
 from mini_agent.sandbox import ShadowGitSnapshot
 from mini_agent.session import SessionLogger
 from mini_agent.tools import build_default_registry
-from mini_agent.tools.descriptions import TOOL_DESC_LANGS, descriptions_for
+from mini_agent.tools.descriptions import descriptions_for
 
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -114,11 +114,6 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     base_url = env.get("MINI_AGENT_BASE_URL") or DEFAULT_BASE_URL
     api_key = env.get("MINI_AGENT_API_KEY") or None
     tool_desc_lang = env.get("MINI_AGENT_TOOL_DESC_LANG") or DEFAULT_TOOL_DESC_LANG
-    if tool_desc_lang not in TOOL_DESC_LANGS:
-        raise ConfigError(
-            f"MINI_AGENT_TOOL_DESC_LANG 必须是 {' 或 '.join(TOOL_DESC_LANGS)},"
-            f"收到:{tool_desc_lang!r}"
-        )
     descriptions_for(tool_desc_lang)  # 启动期校验(未知语言立即报配置错误)
     if not model.startswith("fake:") and not api_key:
         raise ConfigError(

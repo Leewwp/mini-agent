@@ -52,6 +52,10 @@
 工具异常一律由执行器转成 isError 的 tool_result 回填,循环不中断——模型看得见
 错误、可以自我纠正;只有 Provider/内部错误才进 ERROR。
 
+LLM 传输层(`providers.py`)的 thinking 开关经 `extra_body` 携带,且仅对
+`deepseek*` 模型发送(M1 实测口径):其他 OpenAI 兼容端点可能对未知字段直接
+400,故非 deepseek 模型一律省略该字段。
+
 系统提示词为中文定稿版(`loop.py::SYSTEM_PROMPT`,工单 05):「工作方法五步 +
 三条规则」,把 finish 用法(声明时复验)、先读后写、验证优先、只有 run_tests
 计入成功判定四条契约与工具描述各说一遍——约束在「总述」与「用到的工具」两个

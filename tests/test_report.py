@@ -60,6 +60,16 @@ def test_is_test_file_matches_common_conventions():
     assert not is_test_file("README.md")
 
 
+def test_is_test_file_ignores_compiled_test_artifacts():
+    """pyc 编译产物不是测试文件:快照噪声不该触发 ⚠ 测试文件警报(A2)。"""
+    assert not is_test_file("tests/__pycache__/test_x.cpython-312.pyc")
+    assert not is_test_file("__pycache__/conftest.cpython-312.pyc")
+    assert not is_test_file("src/foo.cpython-312.pyc")
+    # 真实测试文件仍照常识别
+    assert is_test_file("tests/test_x.py")
+    assert is_test_file("conftest.py")
+
+
 # ---------- 最近一次测试结果(从 append-only 日志取事实) ----------
 
 

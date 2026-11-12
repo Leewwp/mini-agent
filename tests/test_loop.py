@@ -373,6 +373,14 @@ def test_rejected_finish_gives_remaining_calls_not_executed_receipts(tmp_path):
             pending.discard(m["tool_call_id"])
     assert not pending
 
+    # 回归(A1):跳过原因必须到达模型——「未执行」回执不能是空字符串
+    assistant = next(m for m in step2_request["messages"] if m.get("tool_calls"))
+    skip_call = next(c for c in assistant["tool_calls"] if c["function"]["name"] == "write_file")
+    skip_reply = next(
+        m for m in step2_request["messages"] if m.get("role") == "tool" and m.get("tool_call_id") == skip_call["id"]
+    )
+    assert "未执行" in skip_reply["content"] and "finish 被拒绝后跳过" in skip_reply["content"]
+
 
 # ---------------------------------------------------------------------------
 # 用例组 ⑦:单轮工具调用超过 8 个
@@ -409,6 +417,12 @@ def test_more_than_eight_tool_calls_in_one_turn_all_get_results(tmp_path):
     assert {m["tool_call_id"] for m in tool_replies} == {
         c["id"] for c in assistant["tool_calls"]
     }
+
+    # 回归(A1):超上限的回执原因必须到达模型,不能是空字符串
+    skipped_ids = {c["id"] for c in assistant["tool_calls"][8:]}
+    skipped_replies = [m for m in tool_replies if m["tool_call_id"] in skipped_ids]
+    assert len(skipped_replies) == 2
+    assert all("未执行" in m["content"] and "单轮上限" in m["content"] for m in skipped_replies)
 
 
 # ---------------------------------------------------------------------------

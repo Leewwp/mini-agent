@@ -104,15 +104,19 @@ EN_DESCRIPTIONS: dict[str, str] = {
     ),
 }
 
-TOOL_DESC_LANGS = ("zh", "en")
+_DESCRIPTIONS_BY_LANG: dict[str, dict[str, str]] = {
+    "zh": ZH_DESCRIPTIONS,
+    "en": EN_DESCRIPTIONS,
+}
+
+TOOL_DESC_LANGS = tuple(_DESCRIPTIONS_BY_LANG)
 
 
 def descriptions_for(lang: str) -> dict[str, str]:
     """按语言取描述映射;未知语言是配置错误,直接抛 ConfigError。"""
-    if lang == "zh":
-        return dict(ZH_DESCRIPTIONS)
-    if lang == "en":
-        return dict(EN_DESCRIPTIONS)
-    raise ConfigError(
-        f"MINI_AGENT_TOOL_DESC_LANG 必须是 {' 或 '.join(TOOL_DESC_LANGS)},收到:{lang!r}"
-    )
+    try:
+        return dict(_DESCRIPTIONS_BY_LANG[lang])
+    except KeyError:
+        raise ConfigError(
+            f"MINI_AGENT_TOOL_DESC_LANG 必须是 {' 或 '.join(TOOL_DESC_LANGS)},收到:{lang!r}"
+        ) from None

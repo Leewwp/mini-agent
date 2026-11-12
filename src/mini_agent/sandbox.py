@@ -53,22 +53,15 @@ class PathFence:
         raw = Path(user_path)
         candidate = raw if raw.is_absolute() else self.root / raw
         resolved = candidate.resolve(strict=False)
-        if not self.contains(resolved):
+        try:
+            resolved.relative_to(self.root)
+        except ValueError:
             raise FenceError(
                 f"路径越界:拒绝访问仓库外路径 {user_path}"
                 f"(所有读写必须限制在仓库目录 {self.root} 内;"
                 ".. 逃逸、仓库外绝对路径与指向仓库外的符号链接都会被拒绝)"
-            )
+            ) from None
         return resolved
-
-    def contains(self, path: Path) -> bool:
-        """路径(解析符号链接后)是否落在仓库内。"""
-        resolved = Path(path) if Path(path).is_absolute() else (self.root / path)
-        try:
-            resolved.resolve(strict=False).relative_to(self.root)
-        except ValueError:
-            return False
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +144,21 @@ OUTPUT_HEAD_BYTES = 32 * 1024
 OUTPUT_TAIL_BYTES = 32 * 1024
 
 
+def clip_bytes(
+    data: bytes, *, cap: int, head: int, tail: int, note: str
+) -> str:
+    """头尾裁剪共用实现(纯函数):未超 cap 原样解码;超限保头尾,
+    中间以 ``note``(含 ``{omitted}`` 占位)说明省略字节数。"""
+    if len(data) <= cap:
+        return data.decode("utf-8", errors="replace")
+    omitted = len(data) - head - tail
+    return (
+        data[:head].decode("utf-8", errors="ignore")
+        + note.format(omitted=omitted)
+        + data[-tail:].decode("utf-8", errors="ignore")
+    )
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     """一次子进程执行的结果(stdout/stderr 已按上限截断)。"""
@@ -165,15 +173,13 @@ class ProcessResult:
 
 def clip_output(data: bytes, *, cap: int = SUBPROCESS_OUTPUT_CAP) -> str:
     """把输出字节截到头尾各 32KB 并解码(纯函数;超限补中文说明)。"""
-    if len(data) <= cap:
-        return data.decode("utf-8", errors="replace")
-    omitted = len(data) - OUTPUT_HEAD_BYTES - OUTPUT_TAIL_BYTES
-    clipped = (
-        data[:OUTPUT_HEAD_BYTES].decode("utf-8", errors="ignore")
-        + f"\n…[输出已截断 {omitted} 字节]…\n"
-        + data[-OUTPUT_TAIL_BYTES:].decode("utf-8", errors="ignore")
+    return clip_bytes(
+        data,
+        cap=cap,
+        head=OUTPUT_HEAD_BYTES,
+        tail=OUTPUT_TAIL_BYTES,
+        note="\n…[输出已截断 {omitted} 字节]…\n",
     )
-    return clipped
 
 
 def run_subprocess(
@@ -247,7 +253,13 @@ _GIT_ENV_EXCLUDES = (
 )
 # 降级文件清单跳过的目录(与工具层 IGNORED_DIRS 语义一致;独立定义,
 # 避免 sandbox ← tools 的反向依赖)
-SNAPSHOT_IGNORED_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", "mini-agent-runs"})
+SNAPSHOT_IGNORED_DIRS = frozenset(
+    {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "mini-agent-runs"}
+)
+# 影子库 info/exclude 的排除模式(与 SNAPSHOT_IGNORED_DIRS 同一集合语义;
+# __pycache__/.pytest_cache 是 pytest 副产物噪声,目标仓库无 .gitignore 时
+# 也不能进 diff 与终报修改清单)
+SNAPSHOT_EXCLUDE_PATTERNS = ("mini-agent-runs/", "__pycache__/", ".pytest_cache/")
 
 
 class SnapshotDegradeError(Exception):
@@ -399,7 +411,7 @@ class ShadowGitSnapshot:
         exclude = self._shadow_dir / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with exclude.open("a", encoding="utf-8") as fh:
-            fh.write("\nmini-agent-runs/\n")
+            fh.write("\n" + "\n".join(SNAPSHOT_EXCLUDE_PATTERNS) + "\n")
         self._record_baseline_state()
         self._commit("mini-agent baseline snapshot")
         self._baseline = self._rev("HEAD")
