@@ -53,6 +53,11 @@
 工具异常一律由执行器转成 isError 的 tool_result 回填,循环不中断——模型看得见
 错误、可以自我纠正;只有 Provider/内部错误才进 ERROR。
 
+系统提示词为中文定稿版(`loop.py::SYSTEM_PROMPT`,工单 05):「工作方法五步 +
+三条规则」,把 finish 用法(声明时复验)、先读后写、验证优先、只有 run_tests
+计入成功判定四条契约与工具描述各说一遍——约束在「总述」与「用到的工具」两个
+位置都出现,真实模型按任一路径理解到都不跑偏。
+
 ### 为什么这么设计
 
 - **一次 LLM 往返 = 1 步**:成本与步数成正比,`--max-steps` 因此可解释("最多花
@@ -85,6 +90,15 @@
 | `run_command` | `tools/exec.py` | `shlex` 归一化 → 黑名单 → allowlist(黑名单优先);结果**不计入成功判定** |
 | `run_tests` | `tools/exec.py` | 执行 `--test-cmd`(用户显式提供,视为可信,只归一化);唯一 `is_verifier=True` 的工具;每次执行落 `test_run` 事件 |
 | `finish` | `tools/finish.py` | `result ∈ {success, failed}`;`terminal=True` + `finish_declared` 元数据 |
+
+**描述文案(`tools/descriptions.py`,工单 05 定稿)**:七条工具描述的单一事实源
+是 `ZH_DESCRIPTIONS`(中文,默认);同文件内置语义逐一校准过的英文热备
+`EN_DESCRIPTIONS`,设 `MINI_AGENT_TOOL_DESC_LANG=en` 经
+`build_default_registry(tool_descriptions=…)` 以实例属性整体遮蔽——只换文案、
+不换行为与参数 schema,当前语言记入 `session_meta`。这是 M1 预留的降级预案
+(中文描述若致 function calling 不稳则一键切换);工单 05 真实彩排在
+deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次复现),热备
+未被启用,留作保险。
 
 **路径围栏(`sandbox.py::PathFence`)**:先 `Path.resolve(strict=False)` 再判
 `relative_to(root)`,一次性覆盖 `../` 逃逸、仓库外绝对路径、指向仓库外的符号
@@ -283,7 +297,4 @@ reasoning 与 usage、耗时)、`tool_call`/`tool_result`(日志存全量,模型
 - 本项目全程使用 AI 编程助手辅助规划与实现;具体到哪些文件由 AI 生成、哪些由
   本人改写,将在仓库 AI 使用声明中如实记录。
 
-> **TODO(05):** 中文系统提示词与工具描述的定稿说明(含英文描述热备预案)在
-> 工单 05 落地后补入 §1/§2。
->
 > **TODO(06):** ruff + CI(无 key、无网络出站)落地后,在 §9 附 CI 链接。
