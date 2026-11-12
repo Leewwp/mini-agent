@@ -302,6 +302,9 @@ class OpenAICompatProvider:
     - 只对 429/5xx/网络错误指数退避重试 2 次;400/401/402/422 直接转可操作错误。
     """
 
+    # 单次请求硬上限(显式设置防流式调用无限挂死);整体 deadline 在循环轮次间检查
+    REQUEST_TIMEOUT_S = 600.0
+
     def __init__(
         self,
         *,
@@ -324,7 +327,11 @@ class OpenAICompatProvider:
         if client is not None:
             self._client = client
         else:
-            self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
+            # 显式 timeout:单次请求硬上限,防流式调用无限挂死;
+            # 整体 deadline 由循环在轮次之间检查(见 loop.py 的 deadline 逻辑)
+            self._client = openai.OpenAI(
+                api_key=api_key, base_url=base_url, timeout=self.REQUEST_TIMEOUT_S
+            )
 
     @property
     def model(self) -> str:
