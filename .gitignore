@@ -1,0 +1,13 @@
+# Python 标准产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+
+# 运行产物(会话日志/报告)
+mini-agent-runs/
