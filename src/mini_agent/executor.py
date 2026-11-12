@@ -128,6 +128,28 @@ class ToolExecutor:
         self.hooks = hooks if hooks is not None else HookChain()
         self._clock = clock
 
+    def skip(self, call: ToolCall, *, step: int | None = None, reason: str) -> ToolResult:
+        """不执行调用但补一条结果:每个 tool_call id 都必须有对应结果,
+        否则下一轮请求非法(单轮超上限 / 循环已终止的调用走这里)。"""
+        extra = {"step": step} if step is not None else {}
+        self.logger.emit(
+            "tool_call", call_id=call.id, name=call.name, arguments=call.arguments, **extra
+        )
+        result = ToolResult(
+            call_id=call.id, name=call.name, content="", full_content=reason, is_error=True
+        )
+        self.logger.emit(
+            "tool_result",
+            call_id=call.id,
+            name=call.name,
+            is_error=True,
+            content=reason,
+            truncated=False,
+            duration_ms=0,
+            **extra,
+        )
+        return result
+
     def run(self, call: ToolCall, *, step: int | None = None) -> ToolResult:
         """执行单个工具调用;任何工具侧失败都转 isError 结果,绝不向上抛。"""
         extra = {"step": step} if step is not None else {}
