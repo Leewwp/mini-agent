@@ -82,8 +82,8 @@
 | 工具 | `src/mini_agent/tools/` | 接缝②。`Tool` 协议 + `ToolRegistry`(运行期注册);`fs.py`、`exec.py`、`finish.py` |
 | 执行器 + 钩子 | `src/mini_agent/executor.py` | 接缝③。单个工具调用过钩子链执行、为模型截断结果、写 `tool_call`/`tool_result` 事件 |
 | 会话日志 | `src/mini_agent/session.py` | 接缝④。append-only JSONL、每事件 flush、永不改写 |
-| 沙箱 | `src/mini_agent/sandbox.py` | 路径围栏、命令归一化/黑名单/allowlist、子进程 env 最小化、进程组超时击杀 |
-| 终报 | `src/mini_agent/report.py` | 所有终态共用的五要素终报;影子 git 快照 diff 凭证(`diffs/changes.diff`) |
+| 沙箱 | `src/mini_agent/sandbox.py` | 路径围栏、命令归一化/黑名单/allowlist、子进程 env 最小化、进程组超时击杀、影子 git 快照(`ShadowGitSnapshot`,产出运行前后 diff) |
+| 终报 | `src/mini_agent/report.py` | 所有终态共用的五要素终报渲染;落盘 `report.md` 与快照 diff 产物 `diffs/changes.diff` |
 
 ## 快速开始
 
@@ -188,7 +188,7 @@ mini-agent --repo <路径> --task <文本> [--max-steps N] [--test-cmd CMD] [--m
 | `SUCCESS` | 0 | `verification_passed` | 声明成功**且**声明时复验重跑测试命令通过 |
 | `TESTS_FAILED` | 1 | `verification_failed` / `model_declared_failure` | 复验失败(被拒 finish 后步数耗尽),或模型 `finish(result="failed")` 认输 |
 | `MAX_STEPS` | 2 | `steps_exhausted` | 步数预算耗尽 |
-| `ERROR` | 3 | `model_stalled` / `provider_error` / `response_truncated` / `fake_script_exhausted` / `test_command_not_found` | 空转两轮 / 重试后仍失败 / 输出被 max_tokens 截断 / 测试命令不存在等 |
+| `ERROR` | 3 | `model_stalled` / `provider_error` / `response_truncated` / `fake_script_exhausted` / `test_command_not_found` / `interrupted` | 空转两轮 / 重试后仍失败 / 输出被 max_tokens 截断 / 测试命令不存在 / 手动中断(Ctrl+C,改动与日志保留、不回滚) |
 | `TIMEOUT` | 4 | `deadline_exceeded` | 整体超时 |
 | `UNVERIFIED` | 6 | `no_test_command` | 声明成功但未配置 `--test-cmd`——如实报告「无法验证」,不猜结果 |
 | (配置错误) | 5 | — | CLI 层配置错误(缺 key、`--repo` 不存在、`fake:` 脚本非法等) |

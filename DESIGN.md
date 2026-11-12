@@ -151,6 +151,7 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
 | | | `response_truncated` | `finish_reason=length`(输出被 max_tokens 截断,半截内容丢弃,禁止据此写文件) |
 | | | `fake_script_exhausted` | FakeModel 脚本轮次耗尽(测试/复现场景) |
 | | | `test_command_not_found` | 测试命令不存在/不可执行——配置级错误,**不是**"测试失败" |
+| | | `interrupted` | 手动中断(Ctrl+C):如实以 ERROR 终结,改动与日志保留,不自动回滚 |
 | `TIMEOUT` | 4 | `deadline_exceeded` | 整体超时(单调时钟,可注入) |
 | `UNVERIFIED` | 6 | `no_test_command` | finish(success) 但未配置 `--test-cmd` |
 
@@ -282,9 +283,15 @@ V1 不实现任何 V2 能力,只用接口 + 本节映射 + 接缝证明测试
 `session_meta`(模型名/base_url/温度/max_tokens/thinking/任务/参数)、
 `llm_request`(实际发送的 messages——还原上下文所必需)、`llm_response`(含
 reasoning 与 usage、耗时)、`tool_call`/`tool_result`(日志存全量,模型上下文用
-截断版)、`test_run`(完整 stdout/stderr)、`context_trim`(被移除消息原文)、
+截断版)、`test_run`(头尾截断后的 stdout/stderr)、`context_trim`(被移除消息原文)、
 `final_report`。每事件写后 flush,被 kill 时日志仍完整;append-only,永不改写
 ——这是 V2 压缩/记忆的数据地基。
+
+`test_run` 存的是**头尾截断后**的输出(每流 ≤64KB、头尾各 32KB,即 §2
+`run_subprocess` 的「输出有上限」口径,模型上下文截断同款「保头尾」纪律、上限
+不同)。spec 的「完整输出」与「输出有上限」在此存在张力,这是**有意取舍**:防
+会话日志被海量测试输出撑爆;截断保头尾,pytest 失败摘要在尾部,审计定位问题
+仍够用。
 
 ## 9. 借鉴来源(AI 使用声明的素材,声明本体见 [AI-USAGE.md](AI-USAGE.md))
 
