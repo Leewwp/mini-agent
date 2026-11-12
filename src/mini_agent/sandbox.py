@@ -247,7 +247,13 @@ _GIT_ENV_EXCLUDES = (
 )
 # 降级文件清单跳过的目录(与工具层 IGNORED_DIRS 语义一致;独立定义,
 # 避免 sandbox ← tools 的反向依赖)
-SNAPSHOT_IGNORED_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", "mini-agent-runs"})
+SNAPSHOT_IGNORED_DIRS = frozenset(
+    {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "mini-agent-runs"}
+)
+# 影子库 info/exclude 的排除模式(与 SNAPSHOT_IGNORED_DIRS 同一集合语义;
+# __pycache__/.pytest_cache 是 pytest 副产物噪声,目标仓库无 .gitignore 时
+# 也不能进 diff 与终报修改清单)
+SNAPSHOT_EXCLUDE_PATTERNS = ("mini-agent-runs/", "__pycache__/", ".pytest_cache/")
 
 
 class SnapshotDegradeError(Exception):
@@ -399,7 +405,7 @@ class ShadowGitSnapshot:
         exclude = self._shadow_dir / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with exclude.open("a", encoding="utf-8") as fh:
-            fh.write("\nmini-agent-runs/\n")
+            fh.write("\n" + "\n".join(SNAPSHOT_EXCLUDE_PATTERNS) + "\n")
         self._record_baseline_state()
         self._commit("mini-agent baseline snapshot")
         self._baseline = self._rev("HEAD")

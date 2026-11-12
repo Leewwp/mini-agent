@@ -20,8 +20,10 @@ from mini_agent.sandbox import PathFence
 from mini_agent.tools.base import Tool, ToolError
 from mini_agent.tools.descriptions import ZH_DESCRIPTIONS
 
-# 忽略目录集(spec「工具集」节)
-IGNORED_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", "mini-agent-runs"})
+# 忽略目录集(spec「工具集」节;与快照层 SNAPSHOT_IGNORED_DIRS 语义一致)
+IGNORED_DIRS = frozenset(
+    {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "mini-agent-runs"}
+)
 
 # 上限(spec 钉死的默认值)
 LIST_MAX_DEPTH = 8

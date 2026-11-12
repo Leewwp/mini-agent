@@ -32,8 +32,14 @@ def status_label(status: str) -> str:
 
 
 def is_test_file(relpath: str) -> bool:
-    """常见测试文件约定:test_*.py、*_test.py、conftest.py、tests/ 或 test/ 目录下。"""
+    """常见测试文件约定:test_*.py、*_test.py、conftest.py、tests/ 或 test/ 目录下。
+
+    ``__pycache__`` 内的 .pyc 编译产物不算测试文件——那只是 pytest 副产物
+    噪声,不该触发"改测试作弊"警报。
+    """
     path = relpath.lower()
+    if path.endswith(".pyc") or "__pycache__" in path.split("/"):
+        return False
     name = path.rsplit("/", 1)[-1]
     if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
         return True
