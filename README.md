@@ -2,9 +2,9 @@
 
 [English | 中文](README.zh-CN.md)
 
-<!-- TODO(06): CI badge placeholder — workflow filename to be pinned when ticket 06 lands the
-     GitHub Actions job (ruff + pytest, no API key, no outbound network). -->
-[![CI](https://github.com/Leewwp/mini-agent/actions/workflows/WORKFLOW-NAME-TODO/badge.svg)](https://github.com/Leewwp/mini-agent/actions/workflows/WORKFLOW-NAME-TODO)
+<!-- Badge URL pins the workflow landed by ticket 06 (.github/workflows/ci.yml:
+     ruff + pytest, no API key, no outbound network). Repo address verified at release (07). -->
+[![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml)
 
 # mini-agent
 
@@ -261,8 +261,11 @@ split across fragments, interleaved indexes), so the streaming aggregation code 
 exercised for real. Everything above that seam — CLI, loop, fence, stopping conditions,
 report — is the production code under test.
 
-> **TODO(06):** ruff + GitHub Actions CI badge and the CLI subprocess smoke test land with
-> ticket 06.
+> **Quality gate:** `ruff` (default ruleset) plus a GitHub Actions job
+> (`.github/workflows/ci.yml`: ruff + pytest, no API key, no outbound network) keep the
+> suite green on every push, and `tests/test_cli_smoke.py` exercises the installed
+> `mini-agent` entry point through a real subprocess — exit codes, terminal report and
+> session log included.
 
 ## Repository layout
 
@@ -274,7 +277,7 @@ report — is the production code under test.
 ├── src/mini_agent/               # cli / providers / loop / executor / tools / session / sandbox
 ├── tests/                        # FakeModel-driven pytest suite (no key, no network)
 ├── fixtures/                     # TODO(05): tags-repo, algo-repo demo repositories
-└── .github/workflows/            # TODO(06): ruff + pytest CI
+└── .github/workflows/            # ci.yml: ruff + pytest (single job, no key, no network)
 ```
 
 ## License

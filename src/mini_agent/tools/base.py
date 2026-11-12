@@ -12,8 +12,9 @@ unverified_reason)——循环只读元数据,不按工具名特判。失败以�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 
 class ToolError(Exception):
@@ -61,7 +62,7 @@ class Tool(Protocol):
     @property
     def parameters(self) -> dict: ...
 
-    def execute(self, args: dict) -> "str | ToolOutput": ...
+    def execute(self, args: dict) -> str | ToolOutput: ...
 
 
 @dataclass(frozen=True)

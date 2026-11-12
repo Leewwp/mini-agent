@@ -14,7 +14,10 @@ import secrets
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # Self 为 3.11+ 才进 typing,注解因 future-annotations 不在运行期求值
+    from typing import Self
 
 RUNS_DIR_NAME = "mini-agent-runs"
 
@@ -50,7 +53,7 @@ class SessionLogger:
         repo: Path | None = None,
         now: datetime | None = None,
         suffix: str | None = None,
-    ) -> "SessionLogger":
+    ) -> SessionLogger:
         """按 ``<YYYYmmdd-HHMMSS>-<随机后缀>`` 命名新建会话目录。
 
         ``now``/``suffix`` 可注入,测试用确定性值。
@@ -73,7 +76,7 @@ class SessionLogger:
     def close(self) -> None:
         self._file.close()
 
-    def __enter__(self) -> "SessionLogger":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc_info: object) -> None:

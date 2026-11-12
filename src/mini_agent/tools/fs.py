@@ -11,9 +11,10 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import ClassVar
 
 from mini_agent.sandbox import PathFence
 from mini_agent.tools.base import Tool, ToolError
@@ -55,7 +56,7 @@ class FsContext:
     @classmethod
     def create(
         cls, repo: Path, *, deny_patterns: tuple[str, ...] = DEFAULT_DENY_PATTERNS
-    ) -> "FsContext":
+    ) -> FsContext:
         fence = PathFence(repo)
         return cls(repo=fence.root, fence=fence, deny_patterns=deny_patterns)
 
@@ -153,7 +154,7 @@ class ListFilesTool:
         "mini-agent-runs 目录;深度最多 8 层、条数最多 500,超限部分不展开。"
         "可用 path 参数指定子目录。定位代码请先看文件树,再 read_file。"
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "相对仓库根的子目录路径,默认列出整个仓库"}
@@ -186,7 +187,7 @@ class ReadFileTool:
         "二进制文件与密钥文件(.env、*.pem、id_rsa* 等)拒绝读取。"
         "注意:覆盖已有文件前必须先用本工具读过它。"
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "文件路径(相对仓库根,或仓库内绝对路径)"},
@@ -241,7 +242,7 @@ class WriteFileTool:
         "(防止盲覆盖);所有路径限制在目标仓库内,越界会被拒绝。"
         "密钥文件(.env 等)因拒读而无法被覆盖。"
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "目标文件路径(相对仓库根,或仓库内绝对路径)"},
@@ -306,7 +307,7 @@ class SearchTool:
         "自动忽略 .git/.venv/node_modules/__pycache__/mini-agent-runs 与密钥文件"
         "(.env、*.pem、id_rsa* 等)、二进制文件。"
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": "Python 正则表达式(如 'def \\w+Handle'）"}

@@ -117,7 +117,9 @@ uv run --extra dev pytest -q   # 工单 03 收尾时 179 个测试全绿;无 key
 唯一测试接缝在 Provider 边界:脚本化 FakeModel 按真实 DeepSeek 流式分片规律吐
 chunk(id 只在首片、arguments 跨片、多调用交错),其上全部是生产代码。
 
-> **TODO(06):** ruff + GitHub Actions CI 徽章与 CLI 冒烟测试由工单 06 落地。
+> **质量门:**ruff(默认规则集)+ GitHub Actions 单 job(`.github/workflows/ci.yml`:
+> ruff + pytest,无 API key、无网络出站)守住每次推送;`tests/test_cli_smoke.py`
+> 以真实子进程跑安装好的 `mini-agent` 入口,断言退出码、终报与会话日志。
 
 ## 许可证
 

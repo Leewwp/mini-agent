@@ -153,7 +153,7 @@ def test_hook_chain_before_llm_call_rewrites_messages():
     hooks.on_before_llm_call(
         lambda messages, tools: ([{"role": "user", "content": "压缩后的上下文"}], tools)
     )
-    messages, tools = hooks.before_llm_call([{"role": "user", "content": "很长的原始上下文"}], [])
+    messages, _tools = hooks.before_llm_call([{"role": "user", "content": "很长的原始上下文"}], [])
     assert messages == [{"role": "user", "content": "压缩后的上下文"}]
 
 
