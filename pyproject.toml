@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mini-agent"
+version = "0.1.0"
+description = "本地 CLI 编码 Agent:自研任务循环 + 工具执行边界 + 停止条件 + 结果判断"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+mini-agent = "mini_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mini_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
