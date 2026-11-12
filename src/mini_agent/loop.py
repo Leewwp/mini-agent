@@ -45,6 +45,7 @@ from mini_agent.providers import (
 )
 from mini_agent.session import SessionLogger
 from mini_agent.tools.base import ToolRegistry
+from mini_agent.tools.finish import RESULT_FAILED, RESULT_SUCCESS
 
 # ---------------------------------------------------------------------------
 # 六终态(spec「停止条件」)
@@ -498,13 +499,13 @@ class AgentLoop:
 
     def _handle_terminal(self, call: ToolCall, result, step: int) -> RunOutcome | None:
         declared = result.finish_declared
-        if declared == "failed":
+        if declared == RESULT_FAILED:
             # finish(failed):直接终止,如实报告模型认输
             self._messages.append(_tool_message(call.id, result.content, is_error=False))
             return self._finish_run(
                 FinalState.TESTS_FAILED, "model_declared_failure", step, summary=result.summary
             )
-        if declared == "success":
+        if declared == RESULT_SUCCESS:
             return self._handle_finish_success(call, result, step)
         # terminal 但无声明:按约定未知,拒绝终止并回填(isError)
         self._messages.append(
