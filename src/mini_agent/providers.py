@@ -92,7 +92,11 @@ class LLMResponse:
     finish_reason: str | None = None
 
 
-class ResponseTruncatedError(Exception):
+class ProviderError(Exception):
+    """Provider 调用失败(循环转 ERROR 终态)。"""
+
+
+class ResponseTruncatedError(ProviderError):
     """finish_reason=length:输出被 max_tokens 截断,必须明确报错。"""
 
 
@@ -249,10 +253,6 @@ class LLMProvider(Protocol):
 # ---------------------------------------------------------------------------
 # OpenAI 兼容实现(唯一真实 Provider)
 # ---------------------------------------------------------------------------
-
-
-class ProviderError(Exception):
-    """Provider 调用失败(循环转 ERROR 终态)。"""
 
 
 class ProviderRequestError(ProviderError):
