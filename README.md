@@ -89,8 +89,8 @@ design — this matches the original the project's demo requirements.
 | Tools | `src/mini_agent/tools/` | Seam #2. `Tool` protocol + `ToolRegistry` (runtime registration); `fs.py`, `exec.py`, `finish.py` |
 | Executor + hooks | `src/mini_agent/executor.py` | Seam #3. Runs one tool call through the hook chain, clips results for the model, writes `tool_call`/`tool_result` events |
 | Session log | `src/mini_agent/session.py` | Seam #4. Append-only JSONL, flush after every event, never rewritten |
-| Sandbox | `src/mini_agent/sandbox.py` | Path fence, command normalization/blacklist/allowlist, minimized subprocess env, process-group timeout kill |
-| Report | `src/mini_agent/report.py` | Five-element final report rendered for every terminal state; shadow-git snapshot diff evidence (`diffs/changes.diff`) |
+| Sandbox | `src/mini_agent/sandbox.py` | Path fence, command normalization/blacklist/allowlist, minimized subprocess env, process-group timeout kill, shadow-git snapshot (`ShadowGitSnapshot`) that produces the run-over diff |
+| Report | `src/mini_agent/report.py` | Five-element final report rendered for every terminal state; persists `report.md` and the snapshot diff artifact `diffs/changes.diff` |
 
 ## Quick start
 
@@ -198,7 +198,7 @@ is a CLI-level configuration error, not a loop state.
 | `SUCCESS` | 0 | `verification_passed` | Model declared success **and** the verify-on-finish re-run of the test command passed. |
 | `TESTS_FAILED` | 1 | `verification_failed`, `model_declared_failure` | Tests failed at finish-time re-verification (steps exhausted after a rejected finish), or the model declared `finish(result="failed")`. |
 | `MAX_STEPS` | 2 | `steps_exhausted` | Step budget ran out. |
-| `ERROR` | 3 | `model_stalled`, `provider_error`, `response_truncated`, `fake_script_exhausted`, `test_command_not_found` | Model stalled 2 rounds in a row, provider failed after retries, output truncated by `max_tokens` (`finish_reason=length`), or the test command does not exist. |
+| `ERROR` | 3 | `model_stalled`, `provider_error`, `response_truncated`, `fake_script_exhausted`, `test_command_not_found`, `interrupted` | Model stalled 2 rounds in a row, provider failed after retries, output truncated by `max_tokens` (`finish_reason=length`), the test command does not exist, or the run was interrupted manually (Ctrl+C — changes and logs are kept, nothing rolled back). |
 | `TIMEOUT` | 4 | `deadline_exceeded` | Overall deadline exceeded. |
 | `UNVERIFIED` | 6 | `no_test_command` | Model declared success but no `--test-cmd` was configured — reported honestly instead of guessing. |
 | *(config error)* | 5 | — | Bad CLI usage: missing API key, `--repo` not a directory, invalid `fake:` script, … |

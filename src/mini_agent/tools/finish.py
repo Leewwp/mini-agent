@@ -17,6 +17,8 @@ from mini_agent.tools.base import ToolError, ToolOutput
 from mini_agent.tools.descriptions import ZH_DESCRIPTIONS
 
 VALID_RESULTS = ("success", "failed")
+# 具名常量:循环按 finish_declared 元数据分流时引用,避免裸字面量散落两处
+RESULT_SUCCESS, RESULT_FAILED = VALID_RESULTS
 
 
 class FinishTool:

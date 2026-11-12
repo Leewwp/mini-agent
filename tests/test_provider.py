@@ -61,6 +61,29 @@ def test_thinking_flag_passes_enabled():
     assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
+@pytest.mark.parametrize("thinking", [False, True])
+def test_thinking_extra_body_omitted_for_non_deepseek_models(thinking):
+    # thinking extra_body 是 DeepSeek 私有扩展(M1 实测仅 DeepSeek 有效);
+    # 其他 OpenAI 兼容端点可能对未知字段直接 400,故不得携带
+    client = make_stub_client([TEXT_STREAM])
+    provider = make_provider(client, model="glm-4.6", thinking=thinking)
+    provider.complete([{"role": "user", "content": "你好"}])
+    (kwargs,) = client.completions.calls
+    assert "extra_body" not in kwargs
+
+
+# ---------- 客户端构造 ----------
+
+
+def test_default_client_has_explicit_request_timeout():
+    # 不注入 client 时自建 OpenAI client 必须带显式 timeout:
+    # 单次请求硬上限 600s,防流式调用无限挂死(整体 deadline 在循环轮次间检查)
+    provider = OpenAICompatProvider(
+        model="deepseek-chat", api_key="k", base_url="https://example.invalid"
+    )
+    assert provider._client.timeout == 600.0
+
+
 # ---------- 流式消费与响应拼装 ----------
 
 
