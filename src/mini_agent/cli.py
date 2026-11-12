@@ -1,8 +1,8 @@
 """mini-agent CLI 入口:参数解析、配置装配、Provider 构造与完整循环运行。
 
-工单 03 起接通完整 Agent 循环(替换工单 01 的单次调用曳光弹):
-装配 registry / executor / AgentLoop,流式上屏 + 每步工具活动行,
-所有终态打印报告行(终态/原因/步数/token);五要素终报完整版属工单 04。
+工单 03 接通完整 Agent 循环;工单 04 起主路径为:
+影子 git 快照(基线)→ 完整循环 → 结束快照对账 → 五要素终报(所有终态,
+含 ERROR/TIMEOUT/中断,写 session 目录 report.md + diffs/ 并终端打印)。
 """
 
 from __future__ import annotations
@@ -10,18 +10,26 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 from mini_agent.errors import EXIT_CONFIG_ERROR, ConfigError
 from mini_agent.executor import ToolExecutor
-from mini_agent.loop import SYSTEM_PROMPT, AgentLoop, RunOutcome
+from mini_agent.loop import SYSTEM_PROMPT, AgentLoop
 from mini_agent.providers import (
     ProviderError,
     ReasoningDelta,
     TextDelta,
     create_provider,
 )
+from mini_agent.report import (
+    build_report,
+    read_last_test_run,
+    render_terminal,
+    write_report,
+)
+from mini_agent.sandbox import ShadowGitSnapshot
 from mini_agent.session import SessionLogger
 from mini_agent.tools import build_default_registry
 
@@ -136,25 +144,12 @@ def _stream_handler() -> callable:
     return on_event
 
 
-def _print_report(outcome: RunOutcome, logger: SessionLogger) -> None:
-    """所有终态都打印报告行(五要素完整版属工单 04:diff 摘要等)。"""
-    print()
-    print(f"终态:{outcome.state.value}(原因:{outcome.reason}),退出码 {outcome.exit_code}")
-    if outcome.summary:
-        print(f"模型声明:{outcome.summary}")
-    if outcome.detail:
-        print(f"详情:{outcome.detail}")
-    suffix = "(估算值)" if outcome.total_tokens and outcome.prompt_tokens is None else ""
-    print(
-        f"步数:{outcome.steps};token 用量{suffix}:"
-        f"prompt {outcome.prompt_tokens if outcome.prompt_tokens is not None else '-'} / "
-        f"completion {outcome.completion_tokens} / total {outcome.total_tokens}"
-    )
-    print(f"模型:{outcome.model};会话日志:{logger.path}")
-
-
 def run(config: Config, provider) -> int:
-    """完整循环:装配 registry/executor/AgentLoop,返回进程退出码。"""
+    """完整循环:快照 → 循环 → 快照对账 → 五要素终报;返回进程退出码。
+
+    所有终态(含 ERROR/TIMEOUT/中断/意外异常)都走同一出口:结束快照、
+    写 report.md + diffs/、终端打印终报;失败不自动回滚,改动如实保留。
+    """
     with SessionLogger.create(repo=config.repo) as logger:
         display_base_url = "fake" if config.model.startswith("fake:") else config.base_url
         logger.emit(
@@ -170,6 +165,7 @@ def run(config: Config, provider) -> int:
             test_cmd=config.test_cmd,
             timeout_seconds=config.timeout,
         )
+        snapshot = ShadowGitSnapshot.start(config.repo)  # 基线(失败自动降级,不中断)
         registry = build_default_registry(
             config.repo,
             test_cmd=config.test_cmd,
@@ -192,7 +188,32 @@ def run(config: Config, provider) -> int:
             outcome = loop.run()
         except ProviderError as exc:  # 防御:循环应内部消化一切 Provider 错误
             outcome = loop.emergency_error_outcome(str(exc))
-        _print_report(outcome, logger)
+        except KeyboardInterrupt:
+            outcome = loop.interrupted_outcome()
+        except Exception as exc:  # noqa: BLE001 —— 防御:意外内部错误也要有交代(traceback 走 stderr)
+            traceback.print_exc()
+            outcome = loop.emergency_error_outcome(f"内部错误:{type(exc).__name__}: {exc}")
+        changes = snapshot.finish()  # 结束快照 + diff 对账(失败自动降级)
+        last_test_run = read_last_test_run(logger.path)  # 事实来源:append-only 日志
+        report_text = build_report(
+            outcome,
+            changes=changes,
+            test_cmd=config.test_cmd,
+            last_test_run=last_test_run,
+            session_dir=logger.session_dir,
+            task=config.task,
+        )
+        write_report(logger.session_dir, report_text, changes)
+        print()
+        print(
+            render_terminal(
+                outcome,
+                changes=changes,
+                test_cmd=config.test_cmd,
+                last_test_run=last_test_run,
+                session_dir=logger.session_dir,
+            )
+        )
         return outcome.exit_code
 
 
