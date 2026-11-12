@@ -53,22 +53,15 @@ class PathFence:
         raw = Path(user_path)
         candidate = raw if raw.is_absolute() else self.root / raw
         resolved = candidate.resolve(strict=False)
-        if not self.contains(resolved):
+        try:
+            resolved.relative_to(self.root)
+        except ValueError:
             raise FenceError(
                 f"路径越界:拒绝访问仓库外路径 {user_path}"
                 f"(所有读写必须限制在仓库目录 {self.root} 内;"
                 ".. 逃逸、仓库外绝对路径与指向仓库外的符号链接都会被拒绝)"
-            )
+            ) from None
         return resolved
-
-    def contains(self, path: Path) -> bool:
-        """路径(解析符号链接后)是否落在仓库内。"""
-        resolved = Path(path) if Path(path).is_absolute() else (self.root / path)
-        try:
-            resolved.resolve(strict=False).relative_to(self.root)
-        except ValueError:
-            return False
-        return True
 
 
 # ---------------------------------------------------------------------------
