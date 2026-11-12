@@ -125,7 +125,7 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     )
 
 
-def _stream_handler() -> "callable":
+def _stream_handler() -> callable:
     """归一化事件 → 终端:正文逐字上屏(stdout),思考增量走 stderr 仅作展示。"""
 
     def on_event(event) -> None:

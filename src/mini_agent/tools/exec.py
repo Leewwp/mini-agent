@@ -13,8 +13,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+from typing import ClassVar
 
 from mini_agent.sandbox import (
     DEFAULT_COMMAND_ALLOWLIST,
@@ -85,7 +86,7 @@ class RunCommandTool:
         "默认 120 秒超时,超时会击杀整个进程组;输出超限会截断。"
         "注意:本命令的结果不计入成功判定,验证请使用 run_tests。"
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": "要执行的命令(含参数,如 'python3 scripts/run.py')"}
@@ -128,7 +129,7 @@ class RunTestsTool:
         "成功判定只以本工具的现场结果为准(run_command 的结果不计入验证);"
         "未配置测试命令时会返回明确的工具错误。"
     )
-    parameters = {"type": "object", "properties": {}, "required": []}
+    parameters: ClassVar[dict] = {"type": "object", "properties": {}, "required": []}
     is_verifier = True
 
     def __init__(

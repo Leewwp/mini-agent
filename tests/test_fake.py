@@ -78,7 +78,7 @@ def test_fake_chunks_follow_measured_deepseek_shape():
     assert "".join(c.choices[0].delta.content for c in text_chunks) == "我先看看仓库。"
     assert len(text_chunks) >= 2
     # 末片:finish_reason=tool_calls 且带 usage
-    last_delta, finish, usage = flat_attrs(chunks[-1])
+    _last_delta, finish, usage = flat_attrs(chunks[-1])
     assert finish == "tool_calls"
     assert usage.prompt_tokens > 0 and usage.completion_tokens > 0
     assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens

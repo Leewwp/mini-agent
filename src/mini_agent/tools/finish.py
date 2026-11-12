@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
-from mini_agent.tools.base import Tool, ToolError, ToolOutput
+from typing import ClassVar
+
+from mini_agent.tools.base import ToolError, ToolOutput
 
 VALID_RESULTS = ("success", "failed")
 
@@ -26,7 +28,7 @@ class FinishTool:
         "声明并要求你继续修复;result='failed' 表示任务无法完成,将如实报告失败。"
         "summary 用中文简要说明结果与原因。"
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "result": {

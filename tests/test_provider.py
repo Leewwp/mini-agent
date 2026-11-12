@@ -33,7 +33,7 @@ TEXT_STREAM = [
 
 
 def make_provider(client, **overrides) -> OpenAICompatProvider:
-    params = dict(model="deepseek-flash", api_key="test-key", base_url="https://api.deepseek.com")
+    params = {"model": "deepseek-flash", "api_key": "test-key", "base_url": "https://api.deepseek.com"}
     params.update(overrides)
     return OpenAICompatProvider(client=client, **params)
 

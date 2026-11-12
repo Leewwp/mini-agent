@@ -13,13 +13,13 @@ import json
 import re
 import secrets
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import openai
-
 
 # ---------------------------------------------------------------------------
 # 归一化事件
@@ -246,7 +246,7 @@ class LLMProvider(Protocol):
         messages: list[dict],
         *,
         tools: list[dict] | None = None,
-        on_event: "callable | None" = None,  # type: ignore[valid-type]
+        on_event: callable | None = None,  # type: ignore[valid-type]
     ) -> LLMResponse: ...
 
 

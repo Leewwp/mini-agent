@@ -5,12 +5,11 @@
 """
 
 import json
-from pathlib import Path
 
+from mini_agent.executor import ToolExecutor
 from mini_agent.loop import SYSTEM_PROMPT, AgentLoop, trim_history
 from mini_agent.providers import create_provider
 from mini_agent.session import SessionLogger
-from mini_agent.executor import ToolExecutor
 from mini_agent.tools import build_default_registry
 
 
