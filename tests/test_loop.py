@@ -485,3 +485,42 @@ def test_provider_request_error_maps_to_error_terminal(tmp_path):
     provider = FailingProvider(ProviderRequestError("模型请求被拒绝(HTTP 401)", 401, "检查 key"))
     outcome, _, _ = run_loop(tmp_path, repo, None, behaviors=provider)
     assert outcome.state == "ERROR" and outcome.exit_code == 3
+
+
+# ---------------------------------------------------------------------------
+# reasoning_delta 专门脚本单独测(默认脚本不产生;CI 默认路径 = 演示路径)
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_script_reasoning_shown_but_never_enters_context(tmp_path):
+    """开启 reasoning 的专门脚本:闭环照常,reasoning 只展示、绝不进消息历史。"""
+    repo = make_repo(tmp_path, files=GOOD_TEST_REPO_FILES)
+    turns = {
+        "turns": [
+            {
+                "reasoning": "先运行测试看看现状。",
+                "text": "我来运行测试。",
+                "tool_calls": [{"name": "run_tests", "arguments": {}}],
+            },
+            {
+                "reasoning": "测试通过,可以声明完成。",
+                "tool_calls": [
+                    {"name": "finish", "arguments": {"result": "success", "summary": "测试通过"}}
+                ],
+            },
+        ]
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py"
+    )
+    assert outcome.state == "SUCCESS"
+    # reasoning 在 llm_response 事件里可观测(展示用)
+    responses = llm_events(events, "llm_response")
+    assert responses[0]["reasoning"].startswith("先运行测试")
+    # 但绝不进入后续请求的消息历史(组装消息只放 text)
+    step2_request = next(e for e in events if e["type"] == "llm_request" and e["step"] == 2)
+    assert "先运行测试" not in json.dumps(step2_request["messages"], ensure_ascii=False)
+    assistant_messages = [
+        m for m in step2_request["messages"] if m.get("role") == "assistant"
+    ]
+    assert any(m.get("content") == "我来运行测试。" for m in assistant_messages)

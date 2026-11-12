@@ -144,3 +144,15 @@ def test_run_tests_reports_failing_tests(tmp_path):
     out = tool.execute({})
     assert "退出码 1" in out.content and "assert failed" in out.content
     assert out.verification_passed is False
+
+
+def test_run_tests_timeout_counts_as_verification_failure(tmp_path):
+    """单命令超时被进程组击杀:退出码为负,verification_passed=False(超时也是失败)。"""
+    tool = RunTestsTool(
+        test_cmd=f'"{PY}" -c "import time; time.sleep(5); print(\'never\')"',
+        repo=tmp_path,
+        timeout=0.2,  # 毫秒量级注入,无长等待
+    )
+    out = tool.execute({})
+    assert "超时" in out.content
+    assert out.verification_passed is False and out.is_error is False
