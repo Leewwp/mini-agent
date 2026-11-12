@@ -1,6 +1,6 @@
 # examples
 
-离线复现材料(FakeModel 脚本;asciinema 录屏在工单 07 落地)。
+离线复现材料(FakeModel 脚本;asciinema 录屏见 [`docs/demos/`](../docs/demos/))。
 
 - `fix-cycle.json` — 修复循环的脚本化回放:`list_files → read_file ×2 →
   write_file → run_tests → finish(success)`,针对 `fixtures/tags-repo` 的

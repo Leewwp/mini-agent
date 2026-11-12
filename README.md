@@ -1,9 +1,7 @@
-<!-- SKELETON: drafted post-03, finalize in ticket 07 -->
-
 [English | 中文](README.zh-CN.md)
 
-<!-- Badge URL pins the workflow landed by ticket 06 (.github/workflows/ci.yml:
-     ruff + pytest, no API key, no outbound network). Repo address verified at release (07). -->
+<!-- Badge pins the CI workflow (.github/workflows/ci.yml: ruff + pytest, no API key, no
+     outbound network). The badge 404s until the first push to the public repo — expected. -->
 [![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml)
 
 # mini-agent
@@ -92,7 +90,7 @@ design — this matches the original the project's demo requirements.
 | Executor + hooks | `src/mini_agent/executor.py` | Seam #3. Runs one tool call through the hook chain, clips results for the model, writes `tool_call`/`tool_result` events |
 | Session log | `src/mini_agent/session.py` | Seam #4. Append-only JSONL, flush after every event, never rewritten |
 | Sandbox | `src/mini_agent/sandbox.py` | Path fence, command normalization/blacklist/allowlist, minimized subprocess env, process-group timeout kill |
-| Report | `src/mini_agent/report.py` | **TODO(04):** module lands with ticket 04 (shadow-git snapshot + five-element final report). The diagram edge is already correct; the box is not in the tree yet. |
+| Report | `src/mini_agent/report.py` | Five-element final report rendered for every terminal state; shadow-git snapshot diff evidence (`diffs/changes.diff`) |
 
 ## Quick start
 
@@ -137,8 +135,9 @@ uv run mini-agent --repo /tmp/tags-repo-demo \
   --model fake:examples/fix-cycle.json
 ```
 
-What a successful run looks like (real terminal output from the ticket-05 rehearsal;
-model text streams to stdout, thinking to stderr, tool activity lines per step):
+What a successful run looks like (real terminal output from a 2026-11-12 rehearsal with
+`deepseek-flash`; model text streams to stdout, thinking to stderr, tool activity lines
+per step):
 
 ```
 [步骤 5] 调用工具 run_tests
@@ -254,8 +253,19 @@ Three rehearsed paths, each stable across 2 consecutive real-model runs (2026-11
    `TESTS_FAILED`, exit 1, twice; plus one `MAX_STEPS`, exit 2, variant. Failure
    reported as-is, never fabricated.
 
-> asciinema recordings (success path + honest-failure path) land here with the release
-> ticket.
+### Recorded demos (asciinema)
+
+Two terminal recordings of real `deepseek-flash` runs (2026-11-12), each against a
+temporary `/tmp` copy of a fixture — never the fixture itself, and nothing is uploaded
+anywhere: the `.cast` files are committed under [`docs/demos/`](docs/demos/).
+
+```bash
+asciinema play docs/demos/tags-repo-success.cast   # demo 1: fix normalize_tags → SUCCESS (6 steps)
+asciinema play docs/demos/honest-failure.cast      # demo 3: impossible task → honest TESTS_FAILED
+```
+
+(Requires [asciinema](https://asciinema.org) locally, e.g. `brew install asciinema`;
+`--idle-time-limit` is baked into the casts, so playback skips the waiting.)
 
 ## Observability
 
@@ -275,7 +285,7 @@ from the log alone.
 ## Testing
 
 ```bash
-uv run --extra dev pytest -q   # 217 tests at ticket-05 closeout; no API key, no network
+uv run --extra dev pytest -q   # 217 tests; no API key, no network
 ```
 
 The only test seam is the Provider boundary: a scripted FakeModel streams chunks shaped
@@ -295,21 +305,26 @@ report — is the production code under test.
 ```
 ├── README.md / README.zh-CN.md   # this file + Chinese twin (top-of-file switch links)
 ├── DESIGN.md                     # design rationale: the four elements, cuts, V2 seams
+├── AI-USAGE.md                   # honest disclosure of AI usage in building this project
 ├── GLOSSARY.md                   # bilingual glossary of the seven core terms
+├── LICENSE                       # MIT
 ├── pyproject.toml                # hatchling; console script `mini-agent`; deps: openai
 ├── src/mini_agent/               # cli / providers / loop / executor / tools / session / sandbox
 ├── tests/                        # FakeModel-driven pytest suite (no key, no network)
 ├── fixtures/                     # tags-repo / algo-repo demo repos + REHEARSALS.md records
 ├── examples/                     # fix-cycle.json: scripted FakeModel replay of the fix loop
+├── docs/demos/                   # asciinema recordings (success + honest failure)
 └── .github/workflows/            # ci.yml: ruff + pytest (single job, no key, no network)
 ```
 
 ## License
 
-> **TODO(07):** MIT License file lands with the release ticket.
+[MIT](LICENSE) — Copyright (c) 2026 Leewwp.
 
 ## See also
 
 - [DESIGN.md](DESIGN.md) — how and why the task loop, tool boundary, stopping conditions,
   and result judgment are built; what was cut and why; the V2 extension seams.
+- [AI-USAGE.md](AI-USAGE.md) — honest disclosure of how AI assistants were used to build
+  this project (and what the human did).
 - [GLOSSARY.md](GLOSSARY.md) — the seven terms this project uses, EN / 中文.
