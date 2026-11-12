@@ -1,21 +1,27 @@
 """内置工具集:base(协议/注册表)、fs(文件四件套)、exec(命令/测试)、finish(终止)。"""
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-from mini_agent.tools.base import FunctionTool, Tool, ToolError, ToolOutput, ToolRegistry
+from mini_agent.tools.base import (
+    FunctionTool,
+    Tool,
+    ToolError,
+    ToolOutput,
+    ToolRegistry,
+)
 from mini_agent.tools.exec import make_exec_tools
 from mini_agent.tools.finish import FinishTool
 from mini_agent.tools.fs import FsContext, make_fs_tools
 
 __all__ = [
+    "FinishTool",
+    "FsContext",
     "FunctionTool",
     "Tool",
     "ToolError",
     "ToolOutput",
     "ToolRegistry",
-    "FsContext",
-    "FinishTool",
     "build_default_registry",
 ]
 

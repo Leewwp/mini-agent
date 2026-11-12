@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Callable
 
 from mini_agent.providers import ToolCall
 from mini_agent.session import SessionLogger
@@ -232,7 +232,7 @@ class ToolExecutor:
             )
         except ToolError as exc:
             return self._error_result(call, started, str(exc))
-        except Exception as exc:  # 工具异常不中断循环:转 isError 回填
+        except Exception as exc:  # noqa: BLE001 —— 工具异常不中断循环:转 isError 回填(spec 设计决定)
             return self._error_result(
                 call, started, f"工具执行异常:{type(exc).__name__}: {exc}"
             )
