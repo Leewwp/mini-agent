@@ -143,7 +143,11 @@ class ToolExecutor:
             "tool_call", call_id=call.id, name=call.name, arguments=call.arguments, **extra
         )
         result = ToolResult(
-            call_id=call.id, name=call.name, content="", full_content=reason, is_error=True
+            call_id=call.id,
+            name=call.name,
+            content=reason,  # 回执原因必须到达模型(短定长字符串,无需裁剪)
+            full_content=reason,
+            is_error=True,
         )
         self.logger.emit(
             "tool_result",
