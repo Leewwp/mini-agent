@@ -99,7 +99,7 @@ def test_max_steps_exhaustion_returns_max_steps_outcome(tmp_path):
     # 首个请求含中文系统提示词与任务,且带工具定义
     first_request = events[0]
     assert first_request["messages"][0]["role"] == "system"
-    assert "中文" in SYSTEM_PROMPT or SYSTEM_PROMPT  # 提示词就位(内容断言见 CLI 片)
+    assert "run_tests" in SYSTEM_PROMPT and "finish" in SYSTEM_PROMPT  # 中文提示词就位
     assert first_request["messages"][1] == {"role": "user", "content": "修复测试"}
     assert first_request["tools"] and any(
         t["function"]["name"] == "list_files" for t in first_request["tools"]
@@ -333,6 +333,45 @@ def test_run_command_success_does_not_count_as_verification(tmp_path):
     assert outcome.reason == "verification_failed"
     # run_command 的执行没有产生 test_run 事件(不计入验证链)
     assert all(e["type"] != "test_run" or "pytest" in e["command"] for e in events)
+
+
+def test_rejected_finish_gives_remaining_calls_not_executed_receipts(tmp_path):
+    """finish(success) 被拒后本轮剩余调用也必须有结果——下一轮请求才合法。"""
+    repo = broken_test_repo(tmp_path)
+    turns = {
+        "turns": [
+            {
+                "tool_calls": [
+                    {"name": "read_file", "arguments": {"path": "calc.py"}},
+                    finish_call("success", "测试是过的"),
+                    {"name": "write_file", "arguments": {"path": "never.txt", "content": "x"}},
+                ]
+            },
+            {"tool_calls": [finish_call("failed", "结束")]},
+        ]
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=2
+    )
+    assert outcome.state == "TESTS_FAILED" and outcome.reason == "model_declared_failure"
+    assert not (repo / "never.txt").exists()  # finish 之后的调用未执行
+
+    # 本轮 3 个 tool_call id 全部有结果(write_file 为「未执行」回执;
+    # 复验的 run_tests 也发生在 step 1,故 tool_result 共 4 条)
+    step1_results = [e for e in events if e["type"] == "tool_result" and e.get("step") == 1]
+    assert len(step1_results) == 4
+    assert any("未执行" in e["content"] and e["name"] == "write_file" for e in step1_results)
+
+    # 第 2 步请求的消息历史配对合法(每个 tool_call id 都有 tool 结果)
+    step2_request = next(e for e in events if e["type"] == "llm_request" and e["step"] == 2)
+    pending = set()
+    for m in step2_request["messages"]:
+        for tc in m.get("tool_calls") or []:
+            pending.add(tc["id"])
+        if m.get("role") == "tool":
+            assert m["tool_call_id"] in pending
+            pending.discard(m["tool_call_id"])
+    assert not pending
 
 
 # ---------------------------------------------------------------------------

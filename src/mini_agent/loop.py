@@ -24,7 +24,7 @@ from __future__ import annotations
 import enum
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from mini_agent.errors import (
@@ -231,8 +231,6 @@ def _rebuild_with_summary(messages: list[dict], ranges: list[tuple[int, int]]) -
 # ---------------------------------------------------------------------------
 # AgentLoop
 # ---------------------------------------------------------------------------
-
-ProviderFactory = Callable[[], object]
 
 
 def _tool_message(call_id: str, content: str, *, is_error: bool) -> dict:
@@ -454,7 +452,8 @@ class AgentLoop:
 
     def _execute_turn(self, resp: LLMResponse, step: int) -> RunOutcome | None:
         """执行本轮全部工具调用;返回 RunOutcome 表示循环就此终止。"""
-        for index, call in enumerate(resp.tool_calls):
+        calls = resp.tool_calls
+        for index, call in enumerate(calls):
             if index >= MAX_TOOL_CALLS_PER_TURN:
                 result = self._executor.skip(
                     call, step=step, reason="未执行:超过单轮上限(8 个工具调用)"
@@ -463,7 +462,19 @@ class AgentLoop:
                 self._activity(step, call)
                 result = self._executor.run(call, step=step)
             if result.terminal:
-                return self._handle_terminal(call, result, step)
+                outcome = self._handle_terminal(call, result, step)
+                if outcome is not None:
+                    return outcome
+                # 终止被拒(复验失败/声明无法识别):本轮剩余调用补「未执行」
+                # 回执——每个 tool_call id 都要有结果,下一轮请求才合法
+                for remaining in calls[index + 1 :]:
+                    skipped = self._executor.skip(
+                        remaining, step=step, reason="未执行:本轮 finish 被拒绝后跳过"
+                    )
+                    self._messages.append(
+                        _tool_message(remaining.id, skipped.content, is_error=True)
+                    )
+                return None
             self._messages.append(
                 _tool_message(call.id, result.content, is_error=result.is_error)
             )
