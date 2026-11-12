@@ -32,6 +32,7 @@ from mini_agent.report import (
 from mini_agent.sandbox import ShadowGitSnapshot
 from mini_agent.session import SessionLogger
 from mini_agent.tools import build_default_registry
+from mini_agent.tools.descriptions import TOOL_DESC_LANGS, descriptions_for
 
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -40,6 +41,7 @@ DEFAULT_MAX_TOKENS = 8192
 DEFAULT_MAX_STEPS = 20
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_CONTEXT_TOKENS = 60000
+DEFAULT_TOOL_DESC_LANG = "zh"
 
 
 @dataclass
@@ -56,6 +58,7 @@ class Config:
     timeout: int
     max_context_tokens: int
     thinking: bool
+    tool_desc_lang: str = DEFAULT_TOOL_DESC_LANG
     temperature: float = DEFAULT_TEMPERATURE
     max_tokens: int = DEFAULT_MAX_TOKENS
 
@@ -110,6 +113,13 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     model = args.model or env.get("MINI_AGENT_MODEL") or DEFAULT_MODEL
     base_url = env.get("MINI_AGENT_BASE_URL") or DEFAULT_BASE_URL
     api_key = env.get("MINI_AGENT_API_KEY") or None
+    tool_desc_lang = env.get("MINI_AGENT_TOOL_DESC_LANG") or DEFAULT_TOOL_DESC_LANG
+    if tool_desc_lang not in TOOL_DESC_LANGS:
+        raise ConfigError(
+            f"MINI_AGENT_TOOL_DESC_LANG 必须是 {' 或 '.join(TOOL_DESC_LANGS)},"
+            f"收到:{tool_desc_lang!r}"
+        )
+    descriptions_for(tool_desc_lang)  # 启动期校验(未知语言立即报配置错误)
     if not model.startswith("fake:") and not api_key:
         raise ConfigError(
             "未配置 API key:请设置环境变量 MINI_AGENT_API_KEY"
@@ -127,6 +137,7 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
         timeout=args.timeout,
         max_context_tokens=args.max_context_tokens,
         thinking=args.thinking,
+        tool_desc_lang=tool_desc_lang,
     )
 
 
@@ -159,6 +170,7 @@ def run(config: Config, provider) -> int:
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             thinking=config.thinking,
+            tool_desc_lang=config.tool_desc_lang,
             repo=str(config.repo),
             task=config.task,
             max_steps=config.max_steps,
@@ -170,6 +182,12 @@ def run(config: Config, provider) -> int:
             config.repo,
             test_cmd=config.test_cmd,
             emit=logger.emit,  # run_tests 的 test_run 事件
+            # 英文描述热备:MINI_AGENT_TOOL_DESC_LANG=en 时只换文案不换行为
+            tool_descriptions=(
+                descriptions_for(config.tool_desc_lang)
+                if config.tool_desc_lang != DEFAULT_TOOL_DESC_LANG
+                else None
+            ),
         )
         executor = ToolExecutor(registry=registry, logger=logger)
         loop = AgentLoop(

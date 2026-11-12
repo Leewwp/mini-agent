@@ -18,6 +18,7 @@ from typing import ClassVar
 
 from mini_agent.sandbox import PathFence
 from mini_agent.tools.base import Tool, ToolError
+from mini_agent.tools.descriptions import ZH_DESCRIPTIONS
 
 # 忽略目录集(spec「工具集」节)
 IGNORED_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", "mini-agent-runs"})
@@ -149,11 +150,7 @@ def _render_tree(root: Path, *, max_depth: int = LIST_MAX_DEPTH, max_entries: in
 
 class ListFilesTool:
     name = "list_files"
-    description = (
-        "列出仓库的文件树(树状文本)。自动忽略 .git/.venv/node_modules/__pycache__/"
-        "mini-agent-runs 目录;深度最多 8 层、条数最多 500,超限部分不展开。"
-        "可用 path 参数指定子目录。定位代码请先看文件树,再 read_file。"
-    )
+    description = ZH_DESCRIPTIONS["list_files"]
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -181,12 +178,7 @@ class ListFilesTool:
 
 class ReadFileTool:
     name = "read_file"
-    description = (
-        "读取文本文件内容,支持 offset(起始行号,从 1 开始)与 limit(最多返回行数)"
-        "分段读取。单次读取上限 2000 行或 100KB,超限会被拒绝,请用 offset/limit 分段;"
-        "二进制文件与密钥文件(.env、*.pem、id_rsa* 等)拒绝读取。"
-        "注意:覆盖已有文件前必须先用本工具读过它。"
-    )
+    description = ZH_DESCRIPTIONS["read_file"]
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -236,12 +228,7 @@ class ReadFileTool:
 
 class WriteFileTool:
     name = "write_file"
-    description = (
-        "整文件写入(不支持局部 patch)。新建文件允许,父目录不存在时自动创建;"
-        "覆盖已存在的文件前,必须在本次运行中先用 read_file 读取过该文件"
-        "(防止盲覆盖);所有路径限制在目标仓库内,越界会被拒绝。"
-        "密钥文件(.env 等)因拒读而无法被覆盖。"
-    )
+    description = ZH_DESCRIPTIONS["write_file"]
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -301,12 +288,7 @@ def _iter_repo_files(root: Path, *, max_depth: int = 32) -> Iterator[Path]:
 
 class SearchTool:
     name = "search"
-    description = (
-        "在仓库内按 Python 正则表达式搜索文本文件内容,返回"
-        "「相对路径:行号: 行内容」格式的匹配列表,最多 50 条。"
-        "自动忽略 .git/.venv/node_modules/__pycache__/mini-agent-runs 与密钥文件"
-        "(.env、*.pem、id_rsa* 等)、二进制文件。"
-    )
+    description = ZH_DESCRIPTIONS["search"]
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {

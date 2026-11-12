@@ -33,12 +33,17 @@ def build_default_registry(
     command_timeout: float = 120.0,
     deny_patterns: tuple[str, ...] | None = None,
     emit: Callable[..., None] | None = None,
+    tool_descriptions: dict[str, str] | None = None,
 ) -> ToolRegistry:
     """装配默认工具集(7 个:fs 四件套 + run_command/run_tests + finish)。
 
     所有工具共享同一 ``FsContext``(先读后写标记、密钥 deny-list)与同一
     仓库围栏;``deny_patterns=None`` 用默认 deny-list(.env 精确名、*.pem、
     id_rsa*),传元组覆盖。``emit`` 注入 run_tests 的 test_run 事件回调。
+
+    ``tool_descriptions`` 是描述覆盖映射(如英文热备,``descriptions_for("en")``):
+    以实例属性遮蔽类属性,只换文案不换行为——降级路径不重写代码。键必须是
+    已注册的工具名,写错名直接抛错(配置错误应在启动期暴露,不应静默失效)。
     """
     if deny_patterns is None:
         ctx = FsContext.create(repo)
@@ -50,4 +55,10 @@ def build_default_registry(
     for tool in make_exec_tools(repo, test_cmd=test_cmd, timeout=command_timeout, emit=emit):
         registry.register(tool)
     registry.register(FinishTool())
+    if tool_descriptions is not None:
+        for name in tool_descriptions:
+            tool = registry.get(name)
+            if tool is None:
+                raise ToolError(f"描述覆盖引用了未注册的工具:{name}")
+            tool.description = tool_descriptions[name]  # 实例属性遮蔽类属性,协议允许
     return registry
