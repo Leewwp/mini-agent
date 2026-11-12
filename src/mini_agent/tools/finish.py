@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from mini_agent.tools.base import ToolError, ToolOutput
+from mini_agent.tools.descriptions import ZH_DESCRIPTIONS
 
 VALID_RESULTS = ("success", "failed")
 
@@ -22,12 +23,7 @@ class FinishTool:
     """声明任务结束的唯一出口。"""
 
     name = "finish"
-    description = (
-        "声明任务结束。result='success' 表示你认为任务已完成——系统会当场"
-        "重跑一次预配置的测试命令复验,复验通过才判定成功,未通过会拒绝本次"
-        "声明并要求你继续修复;result='failed' 表示任务无法完成,将如实报告失败。"
-        "summary 用中文简要说明结果与原因。"
-    )
+    description = ZH_DESCRIPTIONS["finish"]
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {

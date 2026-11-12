@@ -27,6 +27,7 @@ from mini_agent.sandbox import (
     run_subprocess,
 )
 from mini_agent.tools.base import Tool, ToolError, ToolOutput
+from mini_agent.tools.descriptions import ZH_DESCRIPTIONS
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
 
@@ -79,13 +80,7 @@ class RunCommandTool:
     """围栏内的通用命令执行:黑名单 + allowlist 双重检查。"""
 
     name = "run_command"
-    description = (
-        "在目标仓库目录执行一条命令。只允许解释器/构建/测试类命令"
-        "(python/python3/pytest/node/npm/npx/go/cargo/make 等 allowlist),"
-        "危险命令(rm -rf、sudo、git push、fork 炸弹)一律拒绝;"
-        "默认 120 秒超时,超时会击杀整个进程组;输出超限会截断。"
-        "注意:本命令的结果不计入成功判定,验证请使用 run_tests。"
-    )
+    description = ZH_DESCRIPTIONS["run_command"]
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -124,11 +119,7 @@ class RunTestsTool:
     """
 
     name = "run_tests"
-    description = (
-        "执行用户通过 --test-cmd 预配置的测试命令,返回退出码与 stdout/stderr。"
-        "成功判定只以本工具的现场结果为准(run_command 的结果不计入验证);"
-        "未配置测试命令时会返回明确的工具错误。"
-    )
+    description = ZH_DESCRIPTIONS["run_tests"]
     parameters: ClassVar[dict] = {"type": "object", "properties": {}, "required": []}
     is_verifier = True
 
