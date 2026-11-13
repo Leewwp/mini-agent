@@ -6,28 +6,44 @@
 
 # mini-agent
 
-一个自研的本地命令行编码 Agent:输入仓库路径和自然语言任务,它自主阅读代码、
-修改文件、运行你预配置的测试命令,把失败输出回填给模型继续修复,直到测试通过
-——或者如实报告失败。
+一个自研的本地命令行编码 Agent——现已以**交互式 REPL** 为主推使用方式:裸命令
+进入持续会话,连续对话、连续工具调用;也可以 `--task` 一次性任务运行。它自主
+阅读代码、修改文件、运行你预配置的测试命令,把失败输出回填给模型继续修复,
+直到测试通过——或者如实报告失败。
+
+```bash
+# 一次性批处理(项目需求验收对象,行为不变)
+mini-agent --repo /tmp/tags-repo-demo --task "修复 normalize_tags…" --test-cmd "pytest -q"
+
+# 或:交互式 REPL 会话(主推用法——持续对话、工具结果可见)
+mini-agent --repo /tmp/tags-repo-demo --test-cmd "pytest -q"
+```
 
 这是一个从零自研的迷你编码智能体。项目的核心在于 **任务循环、工具执行边界、停止
 条件、结果判断** 四要素全部在本仓库内自研(`src/mini_agent/loop.py` 等)并能逐点
 解释。它**不是**现成 Coding Agent(Claude Code、Codex CLI 等)的包装器:依赖树里
-唯一的 SDK 是 `openai` 客户端,只当 OpenAI 兼容传输层用。
+的 SDK 只有 `openai` 客户端(OpenAI 兼容传输层)与 `prompt_toolkit`(REPL 输入框)。
 
 - 自研 Agent 循环:流式输出;一次 LLM 往返计 1 步;单轮工具调用 ≤8 个;空转检测
-  (`model_stalled`)。
+  (`model_stalled`);REPL 用轮次化变体(`run_turn()` / `TurnState`,批处理零改动)。
 - 7 个工具:`list_files` / `read_file` / `write_file` / `search` / `run_command` /
   `run_tests` / `finish`。
+- **交互式 REPL**:Claude Code 式行内滚动会话——流式回复、着色工具结果行、
+  spinner、`/help` `/new` `/compact` `/exit` 斜杠命令、每轮状态行、双击 Ctrl+C 退出。
+- **项目记忆**:repo 根 `AGENTS.md` 启动期注入 system prompt(仅 REPL;32KiB 上限;
+  「追加写、不覆盖」引导)。
+- **手动压缩**:`/compact` 用 LLM 语义摘要 + 最近 2 个完整轮次整体替换旧历史,
+  任何失败都不动历史;机械自动裁剪保留为安全阀。
+- **会话恢复**:`mini-agent --resume <会话目录>` 在新目录续聊(旧日志只读)。
 - 诚实的护栏:路径围栏、短黑名单 + 解释器/构建类 allowlist、子进程环境最小化
   ——威胁模型是「防误伤、不防对抗」(见 [DESIGN.md](DESIGN.md#7-安全边界与威胁模型))。
 - 六终态各有退出码;**失败也是合法结果**,如实报告,绝不静默回滚。
 - 声明时复验(Verify-on-Finish):`finish(result="success")` 只有当场重跑测试命令
   并通过才被采信。
 - append-only JSONL 会话日志(`session.jsonl`):模型条件、每次 LLM 请求/响应、
-  每次工具调用/结果、测试运行、上下文裁剪、终报全部入档。
-- 测试套件**无 API key、无网络**即可全绿(FakeModel 经 `--model fake:<script.json>`
-  注入)。
+  每次工具调用/结果、测试运行、上下文裁剪、压缩、终报全部入档。
+- 测试套件**无 API key、无网络、无 TTY** 即可全绿(FakeModel 经
+  `--model fake:<script.json>` 注入;REPL 测试全注入式)。
 
 系统提示词、工具描述与界面输出为中文,这是对齐项目需求演示要求的设计决定。
 
@@ -100,10 +116,61 @@ uv venv && uv pip install -e ".[dev]"
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-export MINI_AGENT_API_KEY=sk-...   # 默认 DeepSeek;换端点见下表
+export MINI_AGENT_API_KEY=sk-...   # REPL 同样必须有 key(无 key 快速失败退出码 5;
+                                   # --model fake: 例外)。换端点见下表。
 ```
 
-把 fixture 复制到临时目录再运行(agent 真的会写入 `--repo`,且不回滚):
+### 交互式 REPL(主推用法)
+
+把 fixture 复制到临时目录再运行(agent 真的会写入 `--repo`,且不回滚)。裸命令
+`mini-agent`(不带 `--task`)进入会话;`--repo` 省略时默认取当前目录的 git 根:
+
+```bash
+cp -r fixtures/tags-repo /tmp/tags-repo-demo
+cd /tmp/tags-repo-demo
+uv run --project /path/to/mini-agent mini-agent --test-cmd "pytest -q"
+```
+
+进入对话:直接输入消息(Enter 发送;Esc+Enter 换行),工具调用与结果实时可见,
+斜杠命令如下:
+
+| 命令 | 含义 |
+|---|---|
+| `/help` | 显示命令表 |
+| `/new`(别名 `/clear`) | 开新会话:清空历史、重载 `AGENTS.md`、轮换日志与快照 |
+| `/compact [聚焦指令]` | 把对话压缩为语义摘要 + 最近 2 个完整轮次 |
+| `/exit` | 写会话终报(report.md + diff 凭证)并退出(Ctrl+D 或 2 秒内双击 Ctrl+C 同效) |
+
+REPL 会话长什么样(真实 `deepseek-flash` 运行;录屏见[演示](#演示)):
+
+```
+❯ 修复 normalize_tags 对空白和空标签的处理,跑测试验证
+· [步骤 1] 调用工具 read_file
+✓ read_file · def normalize_tags(raw): · 3ms
+…(模型继续读测试、改代码)…
+✓ run_tests · 退出码 0 · 842ms
+✓ 完成 · 6 步 · 17.6k tok
+模型声明:修复了 normalize_tags:strip + 丢弃空标签,6 个用例通过
+❯ /exit
+================ 会话终报 ================
+会话状态:正常退出;轮次 1;总步数 6;模型 deepseek-flash
+token 用量:prompt 17070 / completion 573 / total 17643
+修改文件(1):  tags_utils/normalize.py(修改,+9/-3)
+…
+```
+
+REPL 会话日志在 `~/.mini-agent/sessions/<repo-slug>/`(`--runs-dir` 可覆盖),
+append-only,支持恢复:
+
+```bash
+mini-agent --resume            # 列出该仓库最近 3 个会话后退出
+mini-agent --resume <目录>     # 在新目录续聊(旧日志只读)
+```
+
+仓库根若有 `AGENTS.md`,其内容(≤32KiB)会注入 system prompt 作为项目指令,
+`/new` 时重载;批处理(`--task`)刻意不受记忆注入影响。
+
+### 一次性批处理(项目需求验收对象)
 
 ```bash
 cp -r fixtures/tags-repo /tmp/tags-repo-demo
@@ -125,6 +192,9 @@ cp -r fixtures/tags-repo /tmp/tags-repo-demo
 uv run mini-agent --repo /tmp/tags-repo-demo \
   --task "修复 normalize_tags 对空白和空标签的处理,运行测试验证" \
   --test-cmd "pytest -q" \
+  --model fake:examples/fix-cycle.json
+# REPL 也可离线(管道输入,末行 /exit):
+printf '看看仓库结构\n/exit\n' | uv run mini-agent --repo /tmp/tags-repo-demo \
   --model fake:examples/fix-cycle.json
 ```
 
@@ -150,29 +220,43 @@ raw.split(","),未处理空白与空标签。……修复后 6 个用例全部�
 ## CLI 参数
 
 ```
-mini-agent --repo <路径> --task <文本> [--max-steps N] [--test-cmd CMD] [--model NAME]
+mini-agent [--repo <路径>] [--task <文本>] [--resume [会话目录]] [--runs-dir 目录]
+           [--verbose] [--max-steps N] [--test-cmd CMD] [--model NAME]
            [--timeout 秒] [--max-context-tokens N] [--thinking]
 ```
 
+模式分发:`--task` → 一次性批处理(行为不变);`--resume <目录>` → 恢复会话进
+REPL;裸命令 → 交互式 REPL。`--task` 与 `--resume` 互斥(退出码 5)。
+
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `--repo` | (必填) | 目标仓库目录;agent 真实写入,改动不自动回滚 |
-| `--task` | (必填) | 自然语言任务(中文最佳) |
-| `--max-steps` | `20` | 步数预算;一次 LLM 往返计 1 步 |
+| `--repo` | cwd 的 git 根,否则 cwd | 目标仓库目录(显式给出永远优先);agent 真实写入,改动不自动回滚 |
+| `--task` | 无 | 自然语言任务(中文最佳);给出即批处理模式 |
+| `--resume` | 无 | 要恢复的会话目录(新目录续写,旧日志只读);裸 `--resume` 列出该仓库最近 3 个会话后退出 |
+| `--runs-dir` | `~/.mini-agent/sessions` | REPL 会话根目录(批处理保持 `./mini-agent-runs` + 临时目录回退) |
+| `--verbose` | 关 | REPL 工具结果行显示完整输出(默认摘要行) |
+| `--max-steps` | `20` | 步数预算;一次 LLM 往返计 1 步;REPL 中为每轮预算 |
 | `--test-cmd` | 无 | 预配置测试命令(如 `pytest -q`);缺省时成功无法验证(→ `UNVERIFIED`) |
 | `--model` | `deepseek-flash` | 模型名;或 `fake:<script.json>` 注入脚本化 FakeModel(无 key、无网络) |
-| `--timeout` | `600` | 整体超时秒数 |
+| `--timeout` | `600` | 整体超时秒数;REPL 中为每轮预算 |
 | `--max-context-tokens` | `60000` | 历史裁剪阈值(token,由上一响应的 `usage.prompt_tokens` 触发) |
-| `--thinking` | 关 | 开启思考模式;reasoning 仅展示(stderr),绝不进入消息历史 |
+| `--thinking` | 关 | 开启思考模式;reasoning 仅展示(stderr,REPL 中暗色),绝不进入消息历史 |
+
+REPL 退出码:`/exit`(含 Ctrl+D / 2 秒内双击 Ctrl+C)→ 0,最后轮次失败不影响;
+配置错误(缺 key、`--resume` 非法、参数冲突)→ 5;未捕获内部异常 → 3 并出会话级
+报告。批处理退出码见下表。
 
 环境变量(优先级:flag > 环境变量 > 默认值):
 
 | 环境变量 | 默认值 | 含义 |
 |---|---|---|
-| `MINI_AGENT_API_KEY` | — | API key;除 `--model fake:` 外必填 |
+| `MINI_AGENT_API_KEY` | — | API key;批处理与 REPL 均必填(除 `--model fake:`;REPL 无 key 快速失败退出码 5) |
 | `MINI_AGENT_BASE_URL` | `https://api.deepseek.com` | 任意 OpenAI 兼容端点(DeepSeek 已验证;智谱/MiniMax 尽力支持) |
 | `MINI_AGENT_MODEL` | `deepseek-flash` | 模型名覆盖 |
 | `MINI_AGENT_TOOL_DESC_LANG` | `zh` | 工具描述语言:`zh`(默认)或 `en`(热备);只换七条工具描述文案,行为与参数 schema 不动,当前语言记入 `session_meta` |
+
+运行依赖:`openai`(Apache-2.0)与 `prompt_toolkit`(BSD-3;REPL 输入框)。
+第三方代码搬运与许可证:[NOTICE](NOTICE)。
 
 其余请求默认(见 `cli.py`):`temperature=0.0`、`max_tokens=8192`、恒流式、
 `stream_options.include_usage=true`(provider 不回 usage 时降级为估算,报告标注
@@ -237,11 +321,12 @@ normalize_tags 仅做 raw.split(","),未去除标签两端空白、未丢弃空�
 
 ### 录屏(asciinema)
 
-两段真实 `deepseek-flash` 运行的终端录像(2026-11-12),均在 fixture 的 `/tmp`
-临时副本上录制——绝不动仓库内 fixture,也**未上传任何外部站点**:
-`.cast` 文件直接入库于 [`docs/demos/`](docs/demos/)。
+三段真实 `deepseek-flash` 运行的终端录像,均在 fixture 的 `/tmp` 临时副本上录制
+——绝不动仓库内 fixture,也**未上传任何外部站点**:`.cast` 文件直接入库于
+[`docs/demos/`](docs/demos/)。
 
 ```bash
+asciinema play docs/demos/repl-session.cast        # REPL:多轮对话 + 工具结果 + /compact + /exit 会话终报
 asciinema play docs/demos/tags-repo-success.cast   # 演示 1:修 normalize_tags → SUCCESS(6 步)
 asciinema play docs/demos/honest-failure.cast      # 演示 3:不可完成任务 → 如实 TESTS_FAILED
 ```
@@ -251,27 +336,32 @@ asciinema play docs/demos/honest-failure.cast      # 演示 3:不可完成任务
 
 ## 可观测性
 
-每次运行在工作目录旁写 `mini-agent-runs/<YYYYmmdd-HHMMSS>-<随机后缀>/session.jsonl`
-(若解析后落在 `--repo` 内则改用系统临时目录,避免污染目标仓库)。日志
+批处理在工作目录旁写 `mini-agent-runs/<YYYYmmdd-HHMMSS>-<随机后缀>/session.jsonl`
+(若解析后落在 `--repo` 内则改用系统临时目录,避免污染目标仓库);REPL 会话日志
+在 `~/.mini-agent/sessions/<repo-slug>/…/session.jsonl`。日志
 append-only、每事件写后 flush——进程被 kill 也留下完整可读的日志;永不记录
-API key 与请求头。事件类型八类:
+API key 与请求头。事件类型:批处理八类,
 
 `session_meta`、`llm_request`、`llm_response`、`tool_call`、`tool_result`、
-`test_run`、`context_trim`、`final_report`
+`test_run`、`context_trim`、`final_report`;REPL 专属 `turn_start` / `turn_result` /
+`turn_end`(轮末完整模型视图——会话恢复的数据源)、`memory_loaded`、
+`compact_request` / `compact_response` / `compact`
 
 值得注意的细节:`llm_request` 存实际发送的 messages(还原上下文所必需);
 `test_run` 存完整 stdout/stderr,而模型只看截断版;`context_trim` 存被移除消息
-的原文——仅凭日志即可还原裁剪前的全过程。
+的原文;`compact` 存被替换消息全文——仅凭日志即可还原裁剪与压缩前的全过程。
 
 ## 测试
 
 ```bash
-uv run --extra dev pytest -q   # 217 个测试;无 key、无网络
+uv run --extra dev pytest -q   # 323 个测试;无 key、无网络、无 TTY
 ```
 
 唯一测试接缝在 Provider 边界:脚本化 FakeModel 按真实 DeepSeek 流式分片规律吐
 chunk(id 只在首片、arguments 跨片、多调用交错),流式聚合代码路径被真实执行;
-接缝之上的 CLI、循环、围栏、停止条件、报告全部是被测的生产代码。
+接缝之上的 CLI、循环、围栏、停止条件、报告、REPL 主循环全部是被测的生产代码
+(REPL 测试全注入式:脚本输入 + StringIO 输出 + 假 spinner + 注入时钟,不依赖
+TTY、不挂起)。
 
 > **质量门:**ruff(默认规则集)+ GitHub Actions 单 job
 > (`.github/workflows/ci.yml`:ruff + pytest,无 API key、无网络出站)守住每次

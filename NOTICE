@@ -1,0 +1,61 @@
+NOTICE
+======
+
+mini-agent
+Copyright (c) 2026 Leewwp. Licensed under the MIT License (see LICENSE).
+
+This product includes and adapts software developed by third parties:
+
+----------------------------------------------------------------------
+1. Aider (https://github.com/Aider-AI/aider) — Apache License 2.0
+----------------------------------------------------------------------
+
+The file `src/mini_agent/repl/waiting.py` is derived in whole from
+`aider/waiting.py` of the Aider-AI/aider repository (main branch,
+retrieved 2026-11-14):
+
+    https://github.com/Aider-AI/aider/blob/main/aider/waiting.py
+
+Modifications (Apache-2.0 §4(b) notice):
+  - removed the `rich` dependency: terminal width now uses
+    `shutil.get_terminal_size()`, and cursor show/hide uses the ANSI
+    escape sequences `\x1b[?25l` / `\x1b[?25h`;
+  - removed the leading shebang (the file is now a package module);
+  - added a Chinese import-path docstring reference. All animation
+    logic (pre-rendered frames, 0.5s delayed visibility, 0.1s throttle,
+    backspace cursor positioning, background thread) is unchanged.
+
+License text: https://www.apache.org/licenses/LICENSE-2.0
+
+MIT compatibility: Apache-2.0 components may be redistributed inside an
+MIT project provided the above notice and the Apache-2.0 license text
+remain attached to the derived file (this is done in the file header).
+
+----------------------------------------------------------------------
+2. gptme (https://github.com/gptme/gptme) — MIT License
+----------------------------------------------------------------------
+
+The PromptSession construction skeleton in `src/mini_agent/repl/prompt.py`
+(Enter-to-submit / Esc+Enter-to-insert-newline key bindings, FileHistory +
+AutoSuggestFromHistory + enable_history_search usage) follows the structure
+of `gptme/util/prompt.py` (MIT). It is a structural reference, rewritten
+for this project (no verbatim large-scale copying).
+
+----------------------------------------------------------------------
+3. prompt_toolkit (https://github.com/prompt-toolkit/python-prompt-toolkit)
+   — BSD 3-Clause License
+----------------------------------------------------------------------
+
+Used as the only new runtime dependency of the interactive REPL
+(`prompt_toolkit>=3.0`, transitive dependency: wcwidth, also BSD).
+See the dependency table in README.md.
+
+----------------------------------------------------------------------
+4. Design references (no code copied)
+----------------------------------------------------------------------
+
+The REPL interaction look-and-feel references Claude Code (closed source,
+visual reference only). Context compaction and memory-file mechanisms draw
+on pi-mono (badlogic/pi-mono), OpenAI Codex CLI (codex-rs) and DeepSeek
+Harness design research recorded in DESIGN.md §9 — no code was copied from
+these projects.
