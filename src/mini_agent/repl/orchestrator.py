@@ -160,17 +160,12 @@ class SessionUsage:
 # ---------------------------------------------------------------------------
 
 
-def _noop_load_memory() -> tuple[str | None, dict | None]:
-    """05 接入前的占位记忆加载器:无记忆文件。"""
-    return None, None
-
-
 @dataclass
 class _Segment:
     """一段会话(/new 之间)的日志与快照凭证。"""
 
     logger: SessionLogger
-    snapshot: ShadowGitSnapshot
+    snapshot: ShadowGitSnapshot | None = None
     changes: ChangeSet = field(default_factory=lambda: ChangeSet(available=False))
 
 
@@ -202,7 +197,10 @@ class ChatSession:
         self._output = output
         self._runs_dir = runs_dir
         self._resumed_from = resumed_from
-        self._load_memory = load_memory if load_memory is not None else _noop_load_memory
+        if load_memory is not None:
+            self._load_memory = load_memory
+        else:
+            self._load_memory = None  # 默认走 repo 根 AGENTS.md(工单 14)
         self._now = now
         self._suffix = suffix
         self.usage = SessionUsage()
@@ -222,26 +220,49 @@ class ChatSession:
         return self._segments[-1].logger.session_dir
 
     def _reload_memory(self) -> None:
-        self._memory_text, self._memory_meta = self._load_memory()
+        if self._load_memory is not None:  # 注入加载器(测试/定制)
+            self._memory_text, self._memory_meta = self._load_memory()
+            return
+        # 默认:repo 根 AGENTS.md(REPL-only;batch 不经过 REPL 装配层)
+        from mini_agent.memory import MAX_MEMORY_BYTES, load_project_memory
+
+        warnings: list[str] = []
+        memory = load_project_memory(self._config.repo, warn=warnings.append)
+        for message in warnings:
+            self._output.write(message + "\n")
+        self._output.flush()
+        if memory is None:
+            self._memory_text, self._memory_meta = None, None
+            return
+        self._memory_text = memory.text
+        self._memory_meta = memory.event_fields
+        if memory.event_fields.get("truncated"):
+            kib = MAX_MEMORY_BYTES // 1024
+            self._output.write(
+                f"AGENTS.md 超过 {kib}KiB 上限,已截断注入(全文 {memory.event_fields['bytes']} 字节)\n"
+            )
+            self._output.flush()
 
     def _system_prompt(self) -> str:
         return compose_system_prompt(CHAT_SYSTEM_PROMPT, self._memory_text)
 
     def _start(self, resume_messages: list[dict] | None) -> None:
+        session_dir = create_repl_session_dir(
+            self._config.repo, runs_dir=self._runs_dir, now=self._now, suffix=self._suffix
+        )
+        logger = SessionLogger(session_dir)
+        self._segments.append(_Segment(logger=logger, snapshot=None))
         self._reload_memory()
+        self._emit_session_meta(logger)
+        if self._memory_meta is not None:  # memory_loaded(工单 14;仅文件存在时)
+            logger.emit("memory_loaded", **self._memory_meta)
         system = {"role": "system", "content": self._system_prompt()}
         if resume_messages:
             # 恢复:用当前 SYSTEM_PROMPT + 当前 AGENTS.md 重建 system(设计票 06)
             self._messages = [system] + [m for m in resume_messages if m.get("role") != "system"]
         else:
             self._messages = [system]
-        session_dir = create_repl_session_dir(
-            self._config.repo, runs_dir=self._runs_dir, now=self._now, suffix=self._suffix
-        )
-        logger = SessionLogger(session_dir)
-        self._emit_session_meta(logger)
-        snapshot = ShadowGitSnapshot.start(self._config.repo)
-        self._segments.append(_Segment(logger=logger, snapshot=snapshot))
+        self._segments[-1].snapshot = ShadowGitSnapshot.start(self._config.repo)
         self._rebuild_tools()
 
     def _rebuild_tools(self) -> None:
