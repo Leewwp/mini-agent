@@ -36,6 +36,7 @@ from mini_agent.errors import (
     EXIT_TIMEOUT,
     EXIT_UNVERIFIED,
 )
+from mini_agent.executor import ToolResult
 from mini_agent.providers import (
     FakeScriptExhausted,
     LLMResponse,
@@ -92,6 +93,41 @@ class RunOutcome:
 
 
 # ---------------------------------------------------------------------------
+# 轮次级(工单 10 / 设计票 03):REPL 的 turn 语义,不扩展 FinalState、
+# 不影响批处理退出码;六终态同名值 + REPLIED + INTERRUPTED
+# ---------------------------------------------------------------------------
+
+
+class TurnState(str, enum.Enum):
+    REPLIED = "REPLIED"  # 普通文本回复即合法轮末(chat 模式)
+    INTERRUPTED = "INTERRUPTED"  # Ctrl+C 打断(已补齐 tool 回执)
+
+    # 与 FinalState 同名六值(轮内工具语义与批处理一致)
+    SUCCESS = "SUCCESS"
+    TESTS_FAILED = "TESTS_FAILED"
+    MAX_STEPS = "MAX_STEPS"
+    ERROR = "ERROR"
+    TIMEOUT = "TIMEOUT"
+    UNVERIFIED = "UNVERIFIED"
+
+
+@dataclass(frozen=True)
+class TurnOutcome:
+    """一轮(turn)的结果(与 RunOutcome 同构,无退出码;tokens 容 None)。"""
+
+    state: TurnState
+    reason: str
+    steps: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    model: str
+    summary: str = ""
+    detail: str = ""
+
+
+
+# ---------------------------------------------------------------------------
 # 中文系统提示词(工单 05 定稿:finish 用法 / 先读后写 / 验证优先 /
 # 只有 run_tests 计入成功判定,四条契约在工具描述与系统提示词中各说一遍)
 # ---------------------------------------------------------------------------
@@ -120,7 +156,14 @@ SYSTEM_PROMPT = """\
 
 
 MAX_TOOL_CALLS_PER_TURN = 8
-MIN_KEPT_GROUPS = 2  # 历史裁剪时保底保留的最近交互组数
+MIN_KEPT_GROUPS = 2  # 历史裁剪时保底保留的最近交互组数(turn 模式=最近 2 个 user 轮次)
+
+# /compact 语义摘要 user 消息的固定前缀(工单 13 / 设计票 04)。常量在 loop.py
+# 定义仅为避免循环导入;语义归属压缩机制:turn 分组裁剪按它识别受保护头部。
+COMPACT_SUMMARY_PREFIX = "[会话摘要] 以下是本会话此前的压缩摘要"
+
+# Ctrl+C 打断工具轮时,为未回执 tool_call 补的中断回执
+INTERRUPTED_TOOL_RESULT = "[本轮被用户中断,工具未执行]"
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +197,34 @@ def _find_interaction_groups(messages: list[dict]) -> list[tuple[int, int]]:
     return groups
 
 
+def _find_turn_groups(messages: list[dict]) -> list[tuple[int, int]]:
+    """turn 分组:每条 user 消息到下一条 user 消息为一个 [start, end)。
+
+    组内天然保持 assistant/tool 配对(整轮原样)。批处理不用它;
+    chat 模式的裁剪与 /compact 的切点共用。
+    """
+    starts = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    return [
+        (start, starts[j + 1] if j + 1 < len(starts) else len(messages))
+        for j, start in enumerate(starts)
+    ]
+
+
+def _protected_head_end(messages: list[dict]) -> int:
+    """turn 裁剪的受保护头部右边界:首条**非摘要** user 消息的下标。
+
+    即 [system, user(COMPACT_SUMMARY_PREFIX+摘要)] 整体受保护——语义摘要
+    绝不被当最老 turn 组移除或被机械摘要替换(设计票 03 复审修订)。
+    """
+    for i, m in enumerate(messages):
+        if m.get("role") != "user":
+            continue
+        if not str(m.get("content") or "").startswith(COMPACT_SUMMARY_PREFIX):
+            return i
+    return len(messages)
+
+
+
 def _summary_text(group_count: int, removed_messages: list[dict]) -> str:
     counts = Counter(
         tc.get("function", {}).get("name", "?")
@@ -168,15 +239,34 @@ def _summary_text(group_count: int, removed_messages: list[dict]) -> str:
     )
 
 
+def _turn_summary_text(removed_turns: int) -> str:
+    return (
+        f"[历史裁剪] 为控制上下文长度,已把较早的 {removed_turns} 轮对话"
+        "整段省略并替换为本摘要;完整原始内容见会话日志的 "
+        "context_trim 事件(append-only,可还原)。"
+    )
+
+
 def trim_history(
-    messages: list[dict], *, max_prompt_tokens: int, keep_last_groups: int = MIN_KEPT_GROUPS
+    messages: list[dict],
+    *,
+    max_prompt_tokens: int,
+    keep_last_groups: int = MIN_KEPT_GROUPS,
+    grouping: str = "tool",
 ) -> tuple[list[dict], list[dict]]:
-    """把最老的交互组整组替换为一条摘要文本,直到估算低于阈值。
+    """把最老的历史分组整组替换为一条摘要文本,直到估算低于阈值。
 
     - 触发前的判断由调用方做(阈值用上一响应 usage.prompt_tokens);
+    - ``grouping="tool"``(默认,批处理):按 [assistant(tool_calls)+tool 结果]
+      交互组切;``grouping="turn"``(chat):按 user 轮次切,保底最近
+      ``keep_last_groups`` 轮,受保护头部(system+压缩摘要)绝不移除;
     - 最近 ``keep_last_groups`` 组保底保留,绝不裁穿;
     - 返回 (新消息列表, 被移除的原始消息);后者进 context_trim 事件供还原。
     """
+    if grouping == "turn":
+        return _trim_by_turn_groups(
+            messages, max_prompt_tokens=max_prompt_tokens, keep_last_groups=keep_last_groups
+        )
     groups = _find_interaction_groups(messages)
     if not groups or _history_tokens(messages) <= max_prompt_tokens:
         return messages, []
@@ -186,28 +276,90 @@ def trim_history(
         if len(groups) - gi <= keep_last_groups:
             break  # 保底:最近 N 组不动
         removed_ranges.append(span)
-        trial = _rebuild_with_summary(messages, removed_ranges)
+        trial = _rebuild_with_summary(
+            messages,
+            removed_ranges,
+            lambda count, removed: {
+                "role": "assistant",
+                "content": _summary_text(count, removed),
+            },
+        )
         if _history_tokens(trial) <= max_prompt_tokens:
             break
     if not removed_ranges:
         return messages, []
     removed_messages = [m for start, end in removed_ranges for m in messages[start:end]]
-    new_messages = _rebuild_with_summary(messages, removed_ranges)
+    new_messages = _rebuild_with_summary(
+        messages,
+        removed_ranges,
+        lambda count, removed: {"role": "assistant", "content": _summary_text(count, removed)},
+    )
     return new_messages, removed_messages
 
 
-def _rebuild_with_summary(messages: list[dict], ranges: list[tuple[int, int]]) -> list[dict]:
+def _trim_by_turn_groups(
+    messages: list[dict], *, max_prompt_tokens: int, keep_last_groups: int
+) -> tuple[list[dict], list[dict]]:
+    """turn 分组裁剪(chat):移除最老 user 轮次,保护压缩摘要头部。
+
+    极端超限(保底轮内仍超阈值)时,只对保留轮内部按现有 tool 组逻辑
+    降载——语义摘要 user 消息不是交互组,永远不会被机械摘要替换。
+    """
+    if _history_tokens(messages) <= max_prompt_tokens:
+        return messages, []
+
+    def turn_summary(count: int, removed: list[dict]) -> dict:
+        return {"role": "assistant", "content": _turn_summary_text(count)}
+
+    head_end = _protected_head_end(messages)
+    removable = [span for span in _find_turn_groups(messages) if span[0] >= head_end]
+    removed_ranges: list[tuple[int, int]] = []
+    for gi, span in enumerate(removable):
+        if len(removable) - gi <= keep_last_groups:
+            break  # 保底:最近 N 个 user 轮次不动
+        removed_ranges.append(span)
+        trial = _rebuild_with_summary(messages, removed_ranges, turn_summary)
+        if _history_tokens(trial) <= max_prompt_tokens:
+            break
+    if not removed_ranges:
+        # 保底轮数内仍超限:退化为 tool 组降载(受保护头部不受影响)
+        return trim_history(
+            messages,
+            max_prompt_tokens=max_prompt_tokens,
+            keep_last_groups=keep_last_groups,
+            grouping="tool",
+        )
+    removed_messages = [m for start, end in removed_ranges for m in messages[start:end]]
+    new_messages = _rebuild_with_summary(messages, removed_ranges, turn_summary)
+    if _history_tokens(new_messages) > max_prompt_tokens:
+        # 移除旧轮后仍超限:保留轮内部再按 tool 组降载
+        further, extra = trim_history(
+            new_messages,
+            max_prompt_tokens=max_prompt_tokens,
+            keep_last_groups=keep_last_groups,
+            grouping="tool",
+        )
+        if extra:
+            new_messages = further
+            removed_messages.extend(extra)
+    return new_messages, removed_messages
+
+
+def _rebuild_with_summary(
+    messages: list[dict],
+    ranges: list[tuple[int, int]],
+    summary_factory,
+) -> list[dict]:
     """把给定区间整组移除,在首个区间位置放一条合并摘要。"""
     drop = {i for start, end in ranges for i in range(start, end)}
     group_count = len(ranges)
     removed = [m for i, m in enumerate(messages) if i in drop]
     first = ranges[0][0]
+    summary_message = summary_factory(group_count, removed)
     new_messages: list[dict] = []
     for i, m in enumerate(messages):
         if i == first:
-            new_messages.append(
-                {"role": "assistant", "content": _summary_text(group_count, removed)}
-            )
+            new_messages.append(summary_message)
         elif i not in drop:
             new_messages.append(m)
     return new_messages
@@ -263,32 +415,54 @@ class AgentLoop:
         executor,
         logger: SessionLogger,
         system_prompt: str,
-        task: str,
+        task: str | None = None,
+        initial_messages: list[dict] | None = None,
+        chat_mode: bool = False,
         max_steps: int = 20,
         timeout_seconds: float = 600.0,
         max_context_tokens: int = 60000,
         clock: Callable[[], float] | None = None,
         on_activity: Callable[[str], None] | None = None,
+        on_tool_result: Callable[[ToolResult], None] | None = None,
         stream=None,
     ) -> None:
+        if initial_messages is not None and task is not None:
+            raise ValueError("task 与 initial_messages 不能同时提供")
+        if initial_messages is None and task is None:
+            raise ValueError("必须提供 task 或 initial_messages 之一")
+        if initial_messages is not None and (
+            not initial_messages or initial_messages[0].get("role") != "system"
+        ):
+            raise ValueError("initial_messages 必须以 system 消息开头")
         self._provider = provider
         self._executor = executor
         self._registry: ToolRegistry = executor.registry
         self._logger = logger
-        self._messages: list[dict] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task},
-        ]
+        if initial_messages is not None:
+            # REPL 轮次形态(设计票 03 决议 1):每轮新实例,注入 [system, ...历史]
+            self._messages: list[dict] = [dict(m) for m in initial_messages]
+        else:
+            self._messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": task},
+            ]
+        self._chat_mode = chat_mode
         self._max_steps = max_steps
         self._timeout_seconds = timeout_seconds
         self._max_context_tokens = max_context_tokens
         self._clock = clock if clock is not None else time.monotonic
         self._on_activity = on_activity
+        self._on_tool_result = on_tool_result
         self._stream = stream
         self._usage = _UsageAccumulator()
         self._verification_rejected = False
         self._last_prompt_tokens: int | None = None
         self._steps = 0  # 已完成计数(中断路径终报用;run() 内同步)
+
+    @property
+    def messages(self) -> list[dict]:
+        """当前消息历史(拷贝);REPL 每轮以此为下一轮的 initial_messages。"""
+        return [dict(m) for m in self._messages]
 
     # -- 主循环 --
 
@@ -336,6 +510,112 @@ class AgentLoop:
                 # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(spec)
                 return self._finish_run(FinalState.TESTS_FAILED, "verification_failed", steps)
 
+    # -- 轮次主循环(chat / REPL;设计票 03 决议 1/2/4) --
+
+    def run_turn(self, user_message: str) -> TurnOutcome:
+        """跑一轮:追加用户消息 → 主循环 → 轮末 TurnOutcome。
+
+        chat_mode 下轮末**不发任何终报事件**(turn_result/final_report 均由
+        REPL 编排层发,防双发);Ctrl+C 在此捕获并补齐缺失 tool 回执后以
+        INTERRUPTED 返回——批处理的 KeyboardInterrupt 路径(cli.py)不受影响。
+        """
+        self._messages.append({"role": "user", "content": user_message})
+        try:
+            return self._chat_loop()
+        except KeyboardInterrupt:
+            self._repair_interrupted_tool_results()
+            return self._turn_outcome(
+                TurnState.INTERRUPTED, "user_interrupted", self._steps
+            )
+
+    def _chat_loop(self) -> TurnOutcome:
+        started = self._clock()
+        steps = 0
+        while True:
+            self._steps = steps
+            if steps >= self._max_steps:
+                return self._turn_outcome(TurnState.MAX_STEPS, "steps_exhausted", steps)
+            if self._clock() - started > self._timeout_seconds:
+                return self._turn_outcome(TurnState.TIMEOUT, "deadline_exceeded", steps)
+            self._maybe_trim()
+            try:
+                resp, steps = self._call_llm(steps)
+            except ProviderError as exc:
+                return self._turn_outcome(
+                    TurnState.ERROR, _provider_reason(exc), steps, detail=str(exc)
+                )
+            steps += 1
+
+            self._messages.append(_assistant_message(resp))
+
+            if not resp.tool_calls:
+                # chat 模式:普通文本回复(含空回复)= 合法轮末,不注入 stall 提醒
+                return self._turn_outcome(TurnState.REPLIED, "text_reply", steps)
+            outcome = self._execute_turn(resp, steps)
+            if outcome is not None:
+                return self._as_turn_outcome(outcome)
+            if self._verification_rejected and steps >= self._max_steps:
+                # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(与批处理一致)
+                return self._turn_outcome(
+                    TurnState.TESTS_FAILED, "verification_failed", steps
+                )
+
+    def _turn_outcome(
+        self,
+        state: TurnState,
+        reason: str,
+        steps: int,
+        *,
+        summary: str = "",
+        detail: str = "",
+    ) -> TurnOutcome:
+        return TurnOutcome(
+            state=state,
+            reason=reason,
+            steps=steps,
+            prompt_tokens=self._usage.prompt_tokens,
+            completion_tokens=self._usage.completion_tokens,
+            total_tokens=self._usage.total_tokens,
+            model=self._provider.model,
+            summary=summary,
+            detail=detail,
+        )
+
+    @staticmethod
+    def _as_turn_outcome(outcome: RunOutcome) -> TurnOutcome:
+        """轮内终态(FinalState 同名六值)→ TurnOutcome。"""
+        return TurnOutcome(
+            state=TurnState(outcome.state.value),
+            reason=outcome.reason,
+            steps=outcome.steps,
+            prompt_tokens=outcome.prompt_tokens,
+            completion_tokens=outcome.completion_tokens,
+            total_tokens=outcome.total_tokens,
+            model=outcome.model,
+            summary=outcome.summary,
+            detail=outcome.detail,
+        )
+
+    def _repair_interrupted_tool_results(self) -> None:
+        """为已入历史但未回执的 tool_call 补中断回执,保证下一请求合法。"""
+        answered = {
+            m.get("tool_call_id") for m in self._messages if m.get("role") == "tool"
+        }
+        missing = [
+            tc["id"]
+            for m in self._messages
+            for tc in m.get("tool_calls") or []
+            if tc.get("id") not in answered
+        ]
+        for call_id in missing:
+            self._messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": INTERRUPTED_TOOL_RESULT,
+                }
+            )
+
     def emergency_error_outcome(self, detail: str) -> RunOutcome:
         """防御路径:循环应内部消化一切 Provider/内部错误,此方法兜底意外泄漏。
 
@@ -373,6 +653,9 @@ class AgentLoop:
             summary=summary or "",
             detail=detail,
         )
+        if self._chat_mode:
+            # chat 模式轮末不发终报事件(turn_result/final_report 由 08 编排层发)
+            return outcome
         self._logger.emit(
             "final_report",
             state=outcome.state.value,
@@ -424,20 +707,34 @@ class AgentLoop:
             prompt = _history_tokens(self._messages)
         if prompt <= self._max_context_tokens:
             return
+        grouping = "turn" if self._chat_mode else "tool"
         new_messages, removed = trim_history(
-            self._messages, max_prompt_tokens=self._max_context_tokens
+            self._messages, max_prompt_tokens=self._max_context_tokens, grouping=grouping
         )
         if not removed:
             return
-        removed_groups = len(_find_interaction_groups(removed))
-        self._logger.emit(
-            "context_trim",
-            trigger_prompt_tokens=prompt,
-            max_context_tokens=self._max_context_tokens,
-            removed_groups=removed_groups,
-            removed_messages=removed,  # 原始消息入日志,append-only 可还原
-            kept_messages=len(new_messages),
-        )
+        if self._chat_mode:
+            # chat 模式按 user 轮次切(批处理事件字段保持原样)
+            removed_turns = sum(1 for m in removed if m.get("role") == "user")
+            self._logger.emit(
+                "context_trim",
+                trigger_prompt_tokens=prompt,
+                max_context_tokens=self._max_context_tokens,
+                grouping="turn",
+                removed_turns=removed_turns,
+                removed_messages=removed,  # 原始消息入日志,append-only 可还原
+                kept_messages=len(new_messages),
+            )
+        else:
+            removed_groups = len(_find_interaction_groups(removed))
+            self._logger.emit(
+                "context_trim",
+                trigger_prompt_tokens=prompt,
+                max_context_tokens=self._max_context_tokens,
+                removed_groups=removed_groups,
+                removed_messages=removed,  # 原始消息入日志,append-only 可还原
+                kept_messages=len(new_messages),
+            )
         self._messages = new_messages
 
     # -- 一轮工具执行(≤8,按序;超出补「未执行」结果) --
@@ -450,9 +747,11 @@ class AgentLoop:
                 result = self._executor.skip(
                     call, step=step, reason="未执行:超过单轮上限(8 个工具调用)"
                 )
+                self._notify_tool_result(result)
             else:
                 self._activity(step, call)
                 result = self._executor.run(call, step=step)
+                self._notify_tool_result(result)
             if result.terminal:
                 outcome = self._handle_terminal(call, result, step)
                 if outcome is not None:
@@ -463,6 +762,7 @@ class AgentLoop:
                     skipped = self._executor.skip(
                         remaining, step=step, reason="未执行:本轮 finish 被拒绝后跳过"
                     )
+                    self._notify_tool_result(skipped)
                     self._messages.append(
                         _tool_message(remaining.id, skipped.content, is_error=True)
                     )
@@ -553,12 +853,19 @@ class AgentLoop:
                 arguments="{}",
             )
             self._activity(step, call)
-            results.append(self._executor.run(call, step=step))
+            result = self._executor.run(call, step=step)
+            self._notify_tool_result(result)
+            results.append(result)
         return results
 
     def _activity(self, step: int, call: ToolCall) -> None:
         if self._on_activity is not None:
             self._on_activity(f"[步骤 {step}] 调用工具 {call.name}")
+
+    def _notify_tool_result(self, result: ToolResult) -> None:
+        """工具结果回调(执行、skip、verifier 重跑都触发);批处理不传时无行为变化。"""
+        if self._on_tool_result is not None:
+            self._on_tool_result(result)
 
 
 def _provider_reason(exc: ProviderError) -> str:
