@@ -9,6 +9,7 @@ description = "本地 CLI 编码 Agent:自研任务循环 + 工具执行边界 +
 requires-python = ">=3.10"
 dependencies = [
     "openai>=1.40",
+    "prompt-toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
