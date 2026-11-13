@@ -316,6 +316,30 @@ class ChatSession:
         segment.logger.emit("turn_end", turn=turn_no, messages=self._messages)
         return outcome
 
+    # -- /compact(工单 13 / 设计票 04):UI 反馈(spinner/中断)归 ReplApp --
+
+    def compact(self, instructions: str) -> None:
+        """/compact:成功则整体替换历史并把摘要调用 usage 计入会话总量。
+
+        任何失败(含短历史跳过)都不动历史;KeyboardInterrupt 原样上抛,
+        由 ReplApp 走「已中断压缩」路径(同样不动历史、不写 compact 事件)。
+        """
+        from mini_agent.repl.compact import compact_history
+
+        result = compact_history(
+            provider=self._provider,
+            logger=self._segments[-1].logger,
+            messages=self._messages,
+            instructions=instructions,
+        )
+        if result.ok:
+            self._messages = result.new_messages
+            self.usage.add_compact(result.usage_total_tokens)
+            self._output.write(result.message + "\n")
+        else:
+            self._output.write(result.message + "\n")
+        self._output.flush()
+
     # -- /new:轮换 --
 
     def new_session(self) -> None:

@@ -340,7 +340,7 @@ def run_repl(
         verbose=config.verbose,
         show_reasoning=config.thinking,
         on_new=session.new_session,
-        on_compact=None,  # /compact 机制由工单 13 接入
+        on_compact=session.compact,  # /compact(工单 13):spinner/中断反馈由 ReplApp 管
         on_exit=session.finish,
         banner=banner,
         patch_stdout=patch_stdout_flag,
