@@ -85,8 +85,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="自然语言任务描述;给出即进入批处理模式,省略进入交互式 REPL",
     )
     parser.add_argument(
-        "--resume", default=None, metavar="SESSION_DIR",
-        help="恢复指定会话目录并进入 REPL(与 --task 互斥;不带参数值时列出最近会话)",
+        "--resume", nargs="?", const="", default=None, metavar="SESSION_DIR",
+        help="恢复指定会话目录并进入 REPL(与 --task 互斥);不带值时列出该仓库最近 3 个会话后退出",
     )
     parser.add_argument(
         "--runs-dir", default=None,
@@ -361,7 +361,28 @@ def main(argv: list[str] | None = None) -> int:
             "[配置错误] --task(批处理)与 --resume(恢复会话)不能同时使用", file=sys.stderr
         )
         return EXIT_CONFIG_ERROR
+    if args.resume == "":  # --resume 无参:非交互列出该 repo 最近会话后退出(设计票 06)
+        from mini_agent.resume import list_recent_sessions, render_session_list
+
+        repo = resolve_repo(args)
+        print(render_session_list(list_recent_sessions(
+            repo, runs_dir=Path(args.runs_dir) if args.runs_dir else None,
+        )))
+        return 0
     try:
+        resume_messages = None
+        resumed_from = None
+        if args.resume is not None:
+            from mini_agent.resume import load_resume_messages, resolve_resume_repo
+
+            session_repo = resolve_resume_repo(Path(args.resume), explicit_repo=args.repo)
+            if args.repo is None and session_repo is not None:
+                args.repo = session_repo  # --repo 省略时用 session_meta.repo
+            warnings: list[str] = []
+            resume_messages = load_resume_messages(Path(args.resume), warn=warnings.append)
+            resumed_from = str(Path(args.resume).resolve())
+            for message in warnings:
+                print(f"[会话恢复] {message}")
         config = resolve_config(args)
         provider = create_provider(
             config.model,
@@ -371,13 +392,6 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=config.max_tokens,
             thinking=config.thinking,
         )
-        resume_messages = None
-        resumed_from = None
-        if args.resume is not None:
-            from mini_agent.resume import load_resume_messages
-
-            resume_messages = load_resume_messages(Path(args.resume))
-            resumed_from = str(Path(args.resume).resolve())
     except ConfigError as exc:
         print(f"[配置错误] {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
