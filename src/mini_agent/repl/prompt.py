@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -66,10 +67,16 @@ def build_prompt_session(history_path: Path | None = None) -> PromptSession:
     )
 
 
-def make_plain_input(prompt_text: str = PROMPT_TEXT) -> Callable[[], str]:
-    """非 TTY 降级:内置 input()(测试与管道场景由调用方另行注入 input_fn)。"""
+def make_plain_input(stream=None, prompt_text: str = PROMPT_TEXT) -> Callable[[], str]:
+    """非 TTY 降级输入:TTY 流走内置 input();管道/文件流按行读,EOF 抛 EOFError。"""
 
     def _input() -> str:
-        return input(prompt_text)
+        source = stream if stream is not None else sys.stdin
+        if source.isatty():
+            return input(prompt_text)
+        line = source.readline()
+        if line == "":
+            raise EOFError
+        return line.rstrip("\n")
 
     return _input
