@@ -709,3 +709,137 @@ def test_chat_budget_reminder_fires_even_after_write(tmp_path):
     )
     assert outcome.state == "REPLIED"
     assert any("预算提醒" in line for line in activity)
+
+
+# ---------------------------------------------------------------------------
+# 卡死检测与纠正性提醒(工单 06):同签名重复调用 → 一次性 nudge,仅批处理
+# ---------------------------------------------------------------------------
+
+
+def nudges_in(event, prefix: str) -> int:
+    """数一个 llm_request 历史里含指定前缀(卡顿提醒/收尾提醒)的 user 消息条数。"""
+    return sum(
+        1
+        for m in event["messages"]
+        if m.get("role") == "user" and prefix in (m.get("content") or "")
+    )
+
+
+WRITE_OUT = {
+    "tool_calls": [{"name": "write_file", "arguments": {"path": "out.txt", "content": "x"}}]
+}
+# 首词不在 allowlist → run_command 直接 ToolError(isError),错误信息逐字相同
+FAIL_CMD = {
+    "tool_calls": [
+        {"name": "run_command", "arguments": {"command": "definitely-not-a-command-xyz"}}
+    ]
+}
+OK_CMD = {
+    "tool_calls": [
+        {"name": "run_command", "arguments": {"command": "python3 -c \"print('ok')\""}}
+    ]
+}
+LIST = {"tool_calls": [{"name": "list_files", "arguments": {}}]}
+
+
+def test_stuck_nudge_on_repeated_failing_command_after_write(tmp_path):
+    """v1 环形(证据 A 形态):写后同一条失败命令连跑 3 次 → 第 4 步注入一条
+    「卡顿提醒」;终态仍 MAX_STEPS,后续不再增(每 streak 每模式一次)。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [WRITE_OUT, FAIL_CMD, FAIL_CMD, FAIL_CMD, LIST, LIST]}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=6)
+
+    assert outcome.state == "MAX_STEPS"  # 提醒不改终态语义
+    requests = llm_events(events, "llm_request")
+    assert len(requests) == 6
+    # 前 4 次请求无提醒;第 4 步(第 3 次失败)触发,第 5 次请求起恰一条
+    assert [nudges_in(r, "卡顿提醒") for r in requests[:4]] == [0] * 4
+    assert [nudges_in(r, "卡顿提醒") for r in requests[4:]] == [1, 1]
+    nudge = next(
+        m for m in requests[4]["messages"] if "卡顿提醒" in (m.get("content") or "")
+    )
+    assert "连续第 3 次失败" in nudge["content"]
+    assert "run_command" in nudge["content"]
+    assert all(nudges_in(r, "收尾提醒") == 0 for r in requests)
+
+
+def test_stuck_nudge_on_repeated_successful_command_after_write(tmp_path):
+    """v2 环形(证据 B 形态):写后同一条成功命令连跑 3 次 → 恰一条「收尾提醒」。
+
+    turn 数控制在 3 次内:输出即使逐字相同,P2(第 4 次)也不会在本测试内触发。
+    """
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [WRITE_OUT, OK_CMD, OK_CMD, OK_CMD, LIST, LIST]}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=6)
+
+    assert outcome.state == "MAX_STEPS"
+    requests = llm_events(events, "llm_request")
+    assert [nudges_in(r, "收尾提醒") for r in requests[:4]] == [0] * 4
+    assert [nudges_in(r, "收尾提醒") for r in requests[4:]] == [1, 1]
+    nudge = next(
+        m for m in requests[4]["messages"] if "收尾提醒" in (m.get("content") or "")
+    )
+    assert "连续第 3 次成功" in nudge["content"]
+    assert all(nudges_in(r, "卡顿提醒") == 0 for r in requests)
+
+
+def test_stuck_nudge_on_frozen_identical_output(tmp_path):
+    """P2 冻结:同签名同输出第 4 次 → 一条「卡顿提醒」(冻结文案)。
+
+    list_files 的输出在文件集不变时逐字相同(命令类输出含每次不同的耗时,
+    恰好证明 P2 看的是给模型的 content 本身)。第 3 次先触发 P3「收尾提醒」
+    (P1→P2→P3 顺序 + 三模式独立、每 streak 各一条)。
+    """
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [WRITE_OUT, LIST, LIST, LIST, LIST, LIST]}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=6)
+
+    assert outcome.state == "MAX_STEPS"
+    requests = llm_events(events, "llm_request")
+    # 第 4 步(list 第 3 次)→ P3 收尾提醒,第 5 次请求可见
+    assert [nudges_in(r, "收尾提醒") for r in requests[:4]] == [0] * 4
+    assert [nudges_in(r, "收尾提醒") for r in requests[4:]] == [1] * 2
+    # 第 5 步(list 第 4 次,同输出)→ P2 卡顿提醒(冻结文案),第 6 次请求可见
+    assert [nudges_in(r, "卡顿提醒") for r in requests[:5]] == [0] * 5
+    assert nudges_in(requests[5], "卡顿提醒") == 1
+    frozen = next(
+        m for m in requests[5]["messages"] if "卡顿提醒" in (m.get("content") or "")
+    )
+    assert "完全相同的结果" in frozen["content"] and "连续第 4 次" in frozen["content"]
+
+
+def test_stuck_nudge_not_injected_in_chat_mode(tmp_path):
+    """chat 模式同环形:监测照常计数,但绝不注入提醒 user 消息(轮次边界,
+    理由同预算提醒);轮末历史同样干净。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [FAIL_CMD] * 4}
+    provider = create_provider(f"fake:{write_script(tmp_path, turns)}")
+    logger = SessionLogger(tmp_path / "runs")
+    registry = build_default_registry(repo, emit=logger.emit)
+    executor = ToolExecutor(registry=registry, logger=logger)
+    loop = AgentLoop(
+        provider=provider,
+        executor=executor,
+        logger=logger,
+        system_prompt=SYSTEM_PROMPT,
+        initial_messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "试试跑命令"},
+        ],
+        chat_mode=True,
+        max_steps=4,
+    )
+    try:
+        outcome = loop.run_turn("继续")
+        events = [
+            json.loads(line) for line in logger.path.read_text(encoding="utf-8").splitlines()
+        ]
+    finally:
+        logger.close()
+
+    assert outcome.state == "MAX_STEPS"  # 轮内步数耗尽(既有语义)
+    requests = llm_events(events, "llm_request")
+    assert len(requests) == 4
+    assert all(nudges_in(r, "卡顿提醒") == 0 and nudges_in(r, "收尾提醒") == 0 for r in requests)
+    assert nudges_in({"messages": loop.messages}, "卡顿提醒") == 0
+    assert nudges_in({"messages": loop.messages}, "收尾提醒") == 0

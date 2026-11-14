@@ -49,11 +49,18 @@ mini-agent 是一个从零自研的本地编码 Agent:输入仓库路径与自�
    user 消息(轮次边界,会干扰 turn 分组裁剪与 /compact 切点),改经
    on_activity 打一行展示,已写入也不豁免(预算知情,不是催促;到上限后
    输入「继续」可带完整历史接续)。
-6. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
+6. **卡死检测与纠正性提醒**(工单 06,仅批处理):同一签名(工具名+规范化
+   参数)的调用连续 3 次失败 / 连续 4 次给模型的结果完全相同 / 连续 3 次
+   成功复跑时,一次性注入卡顿/收尾提醒 user 消息(仿 OpenHands
+   software-agent-sdk StuckDetector 的软干预 nudge 级;成功复跑模式为本仓
+   v2 失败证据的社区先例方案)——只提醒、不新增终止路径,最坏仍 MAX_STEPS;
+   判定只看签名与结果元数据(is_error/content),不按工具名特判。chat 模式
+   不注入(user 消息是轮次边界)。
+7. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
    调用不执行、但每个 tool_call id 都补一条「未执行:超过单轮上限」的 isError
    回执(OpenAI 协议要求每个 id 都有结果,否则下一轮请求非法)。finish 被拒绝后
    本轮剩余调用同样补「未执行」回执。
-7. **终止语义** `_handle_terminal()`:只读工具结果元数据
+8. **终止语义** `_handle_terminal()`:只读工具结果元数据
    (`terminal`/`finish_declared`/`verification_passed`/`unverified_reason`),
    绝不按工具名特判。
 

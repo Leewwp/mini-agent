@@ -16,6 +16,9 @@
   ERROR(model_stalled),不空转到 MAX_STEPS;
 - 步数预算提醒(仅批处理):步数用至 75% 仍无写入或结束声明时,一次性注入
   预算提醒——空转检测防「不干活」,它防「只读探索耗尽预算」;
+- 卡死检测与纠正性提醒(仅批处理,工单 06):同一签名(工具名+规范化参数)
+  的调用连续失败/同结果冻结/成功复跑达阈值时,一次性注入纠正性提醒
+  (仿 OpenHands StuckDetector 的 nudge 级)——只提醒不终止,最坏仍 MAX_STEPS;
 - 历史裁剪按「assistant(tool_calls) + 全部对应 tool 结果」整组替换为
   一条摘要文本,绝不单独删 tool 结果;阈值用上一响应 usage.prompt_tokens
   触发,context_trim 事件入日志、可还原。
@@ -49,6 +52,7 @@ from mini_agent.providers import (
     estimate_tokens,
 )
 from mini_agent.session import SessionLogger
+from mini_agent.stuck import StuckMonitor
 from mini_agent.tools.base import ToolRegistry
 from mini_agent.tools.finish import RESULT_FAILED, RESULT_SUCCESS
 
@@ -467,6 +471,8 @@ class AgentLoop:
         self._steps = 0  # 已完成计数(中断路径终报用;run() 内同步)
         self._produced = False  # 已调用 writer 工具或 terminal(finish)声明
         self._budget_reminded = False  # 一次性预算提醒(仅批处理)
+        self._stuck_monitor = StuckMonitor()  # 卡死检测(工单 06)
+        self._pending_nudge: str | None = None  # 待注入的卡顿/收尾提醒(批处理)
 
     @property
     def messages(self) -> list[dict]:
@@ -516,6 +522,7 @@ class AgentLoop:
             if outcome is not None:
                 return outcome
             self._maybe_remind_budget(steps)
+            self._maybe_nudge_stuck()
             if self._verification_rejected and steps >= self._max_steps:
                 # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(spec)
                 return self._finish_run(FinalState.TESTS_FAILED, "verification_failed", steps)
@@ -788,6 +795,18 @@ class AgentLoop:
             }
         )
 
+    def _maybe_nudge_stuck(self) -> None:
+        """批处理一次性卡顿/收尾提醒:同签名重复调用达阈值时注入(工单 06)。
+
+        只提醒、不新增终止路径——最坏情况退化为现状(MAX_STEPS)。chat 模式
+        不注入(user 消息是轮次边界,会干扰 turn 分组裁剪与 /compact 切点,
+        理由同预算提醒):pending 直接丢弃,REPL 每轮新实例,不跨轮残留。
+        """
+        if self._chat_mode or not self._pending_nudge:
+            return
+        self._messages.append({"role": "user", "content": self._pending_nudge})
+        self._pending_nudge = None
+
     def _execute_turn(self, resp: LLMResponse, step: int) -> RunOutcome | None:
         """执行本轮全部工具调用;返回 RunOutcome 表示循环就此终止。"""
         calls = resp.tool_calls
@@ -803,6 +822,11 @@ class AgentLoop:
                 self._activity(step, call)
                 result = self._executor.run(call, step=step)
                 self._notify_tool_result(result)
+                if not result.terminal:
+                    # 卡死检测(工单 06):只喂实际执行的非 terminal 调用;
+                    # skip(超上限/finish 被拒后跳过)与 finish 不喂
+                    nudge = self._stuck_monitor.observe(call, result)
+                    self._pending_nudge = self._pending_nudge or nudge
             if result.terminal:
                 self._produced = True  # 结束声明已出现,预算提醒失去对象
                 outcome = self._handle_terminal(call, result, step)
