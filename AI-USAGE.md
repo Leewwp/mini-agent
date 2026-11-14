@@ -66,9 +66,9 @@ REPL 轮的关键作者决策(均经逐项拍板,详见设计工单):REPL 成为
 
 - **AI 生成(初稿与迭代均由 AI 完成)**:`src/mini_agent/` 全部源码(含 REPL 轮
   的 `repl/`、`memory.py`、`resume.py` 及 `loop.py` 轮次化改造)、`tests/`
-  全部测试(项目提交时 222 个;REPL 轮后共 323 个——本节修正:早期文档写作
-  「217」时点早于工具描述英文热备等收尾票,以提交历史为准,项目提交基线为
-  222,REPL 实现新增 101)、`fixtures/` 两个演示仓库及其测试、
+  全部测试(项目提交时 222 个;REPL 轮后共 323 个;可靠性加固轮后共 336 个——
+  本节修正:早期文档写作「217」时点早于工具描述英文热备等收尾票,以提交历史
+  为准,项目提交基线为 222,REPL 实现新增 101,加固轮新增 13)、`fixtures/` 两个演示仓库及其测试、
   `examples/`、`pyproject.toml`、`.github/workflows/ci.yml`、README 双语版、
   DESIGN.md、GLOSSARY.md、AI-USAGE.md、NOTICE、LICENSE 文本(标准 MIT 模板)。
 - **本人改写**:无逐行改写。作者的修改意见(如演示措辞、威胁模型口径、

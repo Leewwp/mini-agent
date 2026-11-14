@@ -1,7 +1,8 @@
 [English | 中文](README.zh-CN.md)
 
 <!-- Badge pins the CI workflow (.github/workflows/ci.yml: ruff + pytest, no API key, no
-     outbound network). The badge 404s until the first push to the public repo — expected. -->
+     outbound network). While the repo is private the badge is only visible to viewers
+     with repository access; it becomes public with the repo. -->
 [![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml)
 
 # mini-agent
@@ -385,7 +386,7 @@ messages verbatim — trimming and compaction are both reversible from the log a
 ## Testing
 
 ```bash
-uv run --extra dev pytest -q   # 323 tests; no API key, no network, no TTY
+uv run --extra dev pytest -q   # 336 tests; no API key, no network, no TTY
 ```
 
 The only test seam is the Provider boundary: a scripted FakeModel streams chunks shaped
