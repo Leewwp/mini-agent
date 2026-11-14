@@ -88,7 +88,7 @@ LLM 传输层(`providers.py`)的 thinking 开关经 `extra_body` 携带,且仅�
 |---|---|---|
 | `list_files` | `tools/fs.py` | 树状列出;忽略 `.git`/`.venv`/`node_modules`/`__pycache__`/`mini-agent-runs`;深度 ≤8、条数 ≤500 |
 | `read_file` | `tools/fs.py` | 支持 offset/limit;单次 ≤2000 行或 ≤100KB;拒二进制(NUL 嗅探)与非 UTF-8;密钥 deny-list |
-| `write_file` | `tools/fs.py` | 整文件写入;**覆盖已存在文件前必须本次运行读过**;新建允许;父目录自动创建(仍过围栏) |
+| `write_file` | `tools/fs.py` | 整文件写入;**覆盖已存在文件前必须本次运行读过或写过**;新建允许;父目录自动创建(仍过围栏) |
 | `search` | `tools/fs.py` | 纯 Python 正则,`相对路径:行号: 行内容`,≤50 条;跳过忽略目录与密钥文件 |
 | `run_command` | `tools/exec.py` | `shlex` 归一化 → 黑名单 → allowlist(黑名单优先);结果**不计入成功判定** |
 | `run_tests` | `tools/exec.py` | 执行 `--test-cmd`(用户显式提供,视为可信,只归一化);唯一 `is_verifier=True` 的工具;每次执行落 `test_run` 事件 |
@@ -107,7 +107,8 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
 `relative_to(root)`,一次性覆盖 `../` 逃逸、仓库外绝对路径、指向仓库外的符号
 链接(含中间目录软链);所有文件工具共享同一围栏。
 
-**先读后写(`tools/fs.py::FsContext`)**:`read_files` 集合只由 `read_file` 标记;
+**先读后写(`tools/fs.py::FsContext`)**:`read_files` 集合由 `read_file` **或
+成功的 `write_file`** 标记——自己刚写的内容不是未知内容,再覆盖不算盲覆盖;
 `write_file` 覆盖已存在文件前查它。被 deny-list 拒读的文件因此也天然无法被覆盖
 ——零额外代码。
 
@@ -130,7 +131,9 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
   (run_tests)、辅助执行(run_command)、终止(finish),每个都能向读者用
   一句话讲清。多一个工具就多一分「工具菜单代替设计」的嫌疑。
 - **先读后写,新建例外**:防的是「模型盲覆盖没看过的文件」,不是「模型创建新
-  文件」;这条规则同时让密钥文件免于被覆盖(拒读 ⇒ 没读过 ⇒ 拒写)。
+  文件」;这条规则同时让密钥文件免于被覆盖(拒读 ⇒ 没读过 ⇒ 拒写)。成功写入
+  即视为已知——真实彩排中围栏曾把模型对自己刚建文件的重写整个拒掉,模型只好
+  多读 10 行再原样重生成一遍,纯仪式成本(工单 02)。
 - **run_tests 与 run_command 权限分层**:测试命令是用户显式给的、是成功判定的
   依据,按可信输入处理;run_command 是模型的自由度,必须收在 allowlist 内。两者
   都不改变「只有 run_tests 计入成功判定」。

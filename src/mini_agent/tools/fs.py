@@ -254,6 +254,9 @@ class WriteFileTool:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         action = "覆盖已读文件" if rel and path in self._ctx.read_files else "新建文件"
+        # 成功写入即视为已知内容:覆盖自己刚写的文件不算盲覆盖(先读后写的本意
+        # 是防"没见过就覆盖",对刚写出的内容不成立)
+        self._ctx.read_files.add(path)
         return f"已{action}:{rel}({len(content.encode('utf-8'))} 字节)"
 
 

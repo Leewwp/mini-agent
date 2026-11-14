@@ -225,15 +225,14 @@ def test_write_existing_file_after_read_is_allowed(ctx, tools):
     assert "覆盖" in out
 
 
-def test_second_write_requires_fresh_read(ctx, tools):
-    from mini_agent.tools.base import ToolError
-
-    run_tool(tools, "write_file", path="fresh.txt", content="v1")
-    with pytest.raises(ToolError, match="先读"):
-        run_tool(tools, "write_file", path="fresh.txt", content="v2")
-    run_tool(tools, "read_file", path="fresh.txt")
-    run_tool(tools, "write_file", path="fresh.txt", content="v3")
-    assert (ctx.repo / "fresh.txt").read_text(encoding="utf-8") == "v3"
+def test_second_write_to_own_new_file_is_allowed(ctx, tools):
+    # 工单 02:自己刚写的文件内容已知,再覆盖不算盲覆盖(失败 3 步骤 17 的教训——
+    # 曾把模型自己 17KB 的重写整个拒掉,模型只好多读 10 行再原样重生成一遍)
+    out1 = run_tool(tools, "write_file", path="fresh.txt", content="v1")
+    assert "新建" in out1
+    out2 = run_tool(tools, "write_file", path="fresh.txt", content="v2")
+    assert (ctx.repo / "fresh.txt").read_text(encoding="utf-8") == "v2"
+    assert "覆盖" in out2
 
 
 def test_write_new_file_path_still_goes_through_fence(ctx, tools):
