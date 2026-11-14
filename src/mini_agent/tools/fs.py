@@ -28,10 +28,11 @@ IGNORED_DIRS = frozenset(
 # 上限(spec 钉死的默认值)
 LIST_MAX_DEPTH = 8
 LIST_MAX_ENTRIES = 500
-READ_MAX_LINES = 2000
-READ_MAX_BYTES = 100 * 1024
 SEARCH_MAX_RESULTS = 50
 BINARY_SNIFF_BYTES = 8192
+# read_file 页内容预算:为页脚留余量,保证「整页 + 页脚」不触发执行器的
+# 8KB 结果裁剪(头尾裁剪会挖洞,对文件内容是错误语义;工单 03)
+READ_PAGE_BYTES = 7 * 1024 + 512
 
 # 默认密钥 deny-list:精确名(无通配符)按全名匹配,含通配符按 fnmatch
 DEFAULT_DENY_PATTERNS = (".env", "*.pem", "id_rsa*")
@@ -202,20 +203,44 @@ class ReadFileTool:
             )
         text = _read_text_file(path)
         lines = text.splitlines(keepends=True)
+        total = len(lines)
         start = (offset or 1) - 1
+        if total == 0 and start == 0:
+            # 空文件是合法文本文件(如空的 __init__.py):返回空串并标记已读,
+            # 否则它会因先读后写规则变成既不可读也不可写
+            self._ctx.read_files.add(path)
+            return ""
+        if start >= total:
+            hint = f"(有效 offset 1–{total})" if total else "(文件为空)"
+            raise ToolError(f"offset={offset} 超出文件范围:文件共 {total} 行{hint}")
         selected = lines[start : start + limit] if limit else lines[start:]
-        if len(selected) > READ_MAX_LINES:
+        # 按整行累加字节装页,不切断多字节字符;首行超页预算明确报错,不静默截断
+        first_size = len(selected[0].encode("utf-8"))
+        if first_size > READ_PAGE_BYTES:
             raise ToolError(
-                f"本次读取 {len(selected)} 行,超过单次上限 {READ_MAX_LINES} 行:"
-                "请用 offset/limit 分段读取"
+                f"第 {start + 1} 行长 {first_size} 字节,超过单页上限 {READ_PAGE_BYTES} 字节,"
+                "无法按整行返回(不会静默截断半行);请用 search 定位关键内容,"
+                "或让用户拆分该文件"
             )
-        content = "".join(selected)
-        if len(content.encode("utf-8")) > READ_MAX_BYTES:
-            raise ToolError(
-                f"本次读取 {len(content.encode('utf-8'))} 字节,超过单次上限 100KB:"
-                "请用 offset/limit 分段读取"
-            )
-        self._ctx.read_files.add(path)  # 先读后写标记
+        page: list[str] = []
+        used = 0
+        for line in selected:
+            size = len(line.encode("utf-8"))
+            if page and used + size > READ_PAGE_BYTES:
+                break
+            page.append(line)
+            used += size
+        content = "".join(page)
+        last = start + len(page)
+        if last < total:
+            # 页脚 = 可执行的续读指引:行号范围 / 总行数 / 下一页 offset
+            content += f"\n---\n[第 {start + 1}–{last} 行 / 共 {total} 行;续读 offset={last + 1}]\n"
+        elif start > 0:
+            # 续读到达末页:无标记时模型无法区分「读完了」与「还有更多」
+            # (重跑实证:DESIGN.md 末页被连读 3 次才被自行断定读完);
+            # 首页即全文(小文件,offset=1)不附任何标记,保持精确内容契约
+            content += f"\n---\n[第 {start + 1}–{last} 行 / 共 {total} 行;已到文件末尾]\n"
+        self._ctx.read_files.add(path)  # 先读后写标记(护栏非安全边界,不跟踪覆盖率)
         return content
 
 
@@ -227,6 +252,7 @@ class ReadFileTool:
 class WriteFileTool:
     name = "write_file"
     description = ZH_DESCRIPTIONS["write_file"]
+    is_writer = True  # 产出落盘产物:步数预算提醒据此识别「已进入产出阶段」(工单 04)
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -254,6 +280,9 @@ class WriteFileTool:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         action = "覆盖已读文件" if rel and path in self._ctx.read_files else "新建文件"
+        # 成功写入即视为已知内容:覆盖自己刚写的文件不算盲覆盖(先读后写的本意
+        # 是防"没见过就覆盖",对刚写出的内容不成立)
+        self._ctx.read_files.add(path)
         return f"已{action}:{rel}({len(content.encode('utf-8'))} 字节)"
 
 

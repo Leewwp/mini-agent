@@ -37,17 +37,20 @@ def test_argparse_full_param_set_and_defaults():
     assert args.timeout == 600
     assert args.max_context_tokens == 60000
     assert args.thinking is False
+    assert args.max_tokens == 32768  # DEFAULT_MAX_TOKENS(providers.py 单一事实源)
     # 全参数形式可解析
     full = build_arg_parser().parse_args(
         [
             "--repo", "r", "--task", "t", "--max-steps", "5",
             "--test-cmd", "pytest -q", "--model", "deepseek-v4-pro",
             "--timeout", "120", "--max-context-tokens", "30000", "--thinking",
+            "--max-tokens", "65536",
         ]
     )
     assert full.max_steps == 5 and full.test_cmd == "pytest -q"
     assert full.model == "deepseek-v4-pro" and full.timeout == 120
     assert full.max_context_tokens == 30000 and full.thinking is True
+    assert full.max_tokens == 65536
 
 
 def test_help_copy_is_chinese():
@@ -90,6 +93,40 @@ def test_model_resolution_default_env_and_flag(monkeypatch, tmp_path):
         env={"MINI_AGENT_MODEL": "glm-4.7", "MINI_AGENT_API_KEY": "k"},
     )
     assert cfg.model == "deepseek-v4-pro"  # CLI flag 覆盖环境变量
+
+
+def test_max_tokens_default_flag_and_validation(monkeypatch, tmp_path):
+    clean_env(monkeypatch)
+    env = {"MINI_AGENT_API_KEY": "k"}
+    cfg = resolve_config(make_args(tmp_path), env=env)
+    assert cfg.max_tokens == 32768  # 默认输出上限(DeepSeek 官方上限 384K,取宽裕默认)
+    cfg = resolve_config(make_args(tmp_path, max_tokens=65536), env=env)
+    assert cfg.max_tokens == 65536
+    with pytest.raises(ConfigError, match="--max-tokens"):
+        resolve_config(make_args(tmp_path, max_tokens=0), env=env)
+
+
+def test_main_records_max_tokens_in_session_meta(monkeypatch, tmp_path):
+    run_fake_main(
+        monkeypatch,
+        tmp_path,
+        {
+            "turns": [
+                {
+                    "text": "ok",
+                    "tool_calls": [{"name": "finish", "arguments": {"result": "success", "summary": "ok"}}],
+                }
+            ]
+        },
+        extra_args=["--max-tokens", "4096"],
+    )
+    runs_dir = tmp_path / "mini-agent-runs"
+    (session_dir,) = [d for d in runs_dir.iterdir() if d.is_dir()]
+    events = [
+        json.loads(line)
+        for line in (session_dir / "session.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[0]["max_tokens"] == 4096  # 配置真实进入会话元数据
 
 
 # ---------- 端到端(FakeModel) ----------

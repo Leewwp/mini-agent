@@ -577,3 +577,65 @@ def test_reasoning_script_reasoning_shown_but_never_enters_context(tmp_path):
         m for m in step2_request["messages"] if m.get("role") == "assistant"
     ]
     assert any(m.get("content") == "我来运行测试。" for m in assistant_messages)
+
+
+# ---------------------------------------------------------------------------
+# 步数预算提醒(工单 04):只防「过度准备耗尽预算」,一次性,仅批处理
+# ---------------------------------------------------------------------------
+
+
+def budget_reminders_in(event) -> int:
+    return sum(
+        1
+        for m in event["messages"]
+        if m.get("role") == "user" and "预算提醒" in (m.get("content") or "")
+    )
+
+
+def test_budget_reminder_injected_once_at_75_percent_when_read_only(tmp_path):
+    """20 步全只读:第 16 次 llm_request 起历史里恰好一条提醒,前 15 次没有。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [{"tool_calls": [{"name": "list_files", "arguments": {}}]}] * 20}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=20)
+
+    assert outcome.state == "MAX_STEPS"  # 提醒不改终态语义
+    requests = llm_events(events, "llm_request")
+    assert len(requests) == 20
+    assert [budget_reminders_in(r) for r in requests[:15]] == [0] * 15
+    assert [budget_reminders_in(r) for r in requests[15:]] == [1] * 5  # 只提醒一次
+    reminder = next(
+        m for m in requests[15]["messages"] if "预算提醒" in (m.get("content") or "")
+    )
+    assert "15/20" in reminder["content"]
+
+
+def test_budget_reminder_skipped_when_write_happened_before_threshold(tmp_path):
+    """75% 前出现过 write_file:全程不提醒(已进入产出阶段)。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    write = {
+        "tool_calls": [{"name": "write_file", "arguments": {"path": "out.txt", "content": "x"}}]
+    }
+    read = {"tool_calls": [{"name": "list_files", "arguments": {}}]}
+    turns = {"turns": [read, write] + [read] * 18}
+    outcome, events, _ = run_loop(tmp_path, repo, turns, max_steps=20)
+
+    assert outcome.state == "MAX_STEPS"
+    requests = llm_events(events, "llm_request")
+    assert all(budget_reminders_in(r) == 0 for r in requests)
+
+
+def test_budget_reminder_skipped_after_finish_attempt(tmp_path):
+    """finish 声明被拒后继续只读:已有结束声明,不再提醒。"""
+    repo = broken_test_repo(tmp_path)
+    turns = {
+        "turns": [
+            {"tool_calls": [finish_call("success", "复验会失败")]}
+        ]
+        + [{"tool_calls": [{"name": "list_files", "arguments": {}}]}] * 19
+    }
+    outcome, events, _ = run_loop(
+        tmp_path, repo, turns, test_cmd="python3 -m pytest -q test_calc.py", max_steps=20
+    )
+    assert outcome.state == "TESTS_FAILED"  # 复验被拒后步数耗尽(既有语义)
+    requests = llm_events(events, "llm_request")
+    assert all(budget_reminders_in(r) == 0 for r in requests)

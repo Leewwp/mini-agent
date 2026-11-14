@@ -222,7 +222,7 @@ raw.split(","),未处理空白与空标签。……修复后 6 个用例全部�
 ```
 mini-agent [--repo <路径>] [--task <文本>] [--resume [会话目录]] [--runs-dir 目录]
            [--verbose] [--max-steps N] [--test-cmd CMD] [--model NAME]
-           [--timeout 秒] [--max-context-tokens N] [--thinking]
+           [--timeout 秒] [--max-context-tokens N] [--max-tokens N] [--thinking]
 ```
 
 模式分发:`--task` → 一次性批处理(行为不变);`--resume <目录>` → 恢复会话进
@@ -240,6 +240,7 @@ REPL;裸命令 → 交互式 REPL。`--task` 与 `--resume` 互斥(退出码 5)�
 | `--model` | `deepseek-flash` | 模型名;或 `fake:<script.json>` 注入脚本化 FakeModel(无 key、无网络) |
 | `--timeout` | `600` | 整体超时秒数;REPL 中为每轮预算 |
 | `--max-context-tokens` | `60000` | 历史裁剪阈值(token,由上一响应的 `usage.prompt_tokens` 触发) |
+| `--max-tokens` | `32768` | 单次响应输出上限;DeepSeek 官方上限 384K,非 DeepSeek 端点输出上限更低时需显式调小 |
 | `--thinking` | 关 | 开启思考模式;reasoning 仅展示(stderr,REPL 中暗色),绝不进入消息历史 |
 
 REPL 退出码:`/exit`(含 Ctrl+D / 2 秒内双击 Ctrl+C)→ 0,最后轮次失败不影响;
@@ -258,7 +259,8 @@ REPL 退出码:`/exit`(含 Ctrl+D / 2 秒内双击 Ctrl+C)→ 0,最后轮次失�
 运行依赖:`openai`(Apache-2.0)与 `prompt_toolkit`(BSD-3;REPL 输入框)。
 第三方代码搬运与许可证:[NOTICE](NOTICE)。
 
-其余请求默认(见 `cli.py`):`temperature=0.0`、`max_tokens=8192`、恒流式、
+其余请求默认(见 `cli.py` / `providers.py`):`temperature=0.0`、`max_tokens=32768`
+(可用 `--max-tokens` 调整;输出被截断时诚实报 `ERROR/response_truncated` 并附当前上限)、恒流式、
 `stream_options.include_usage=true`(provider 不回 usage 时降级为估算,报告标注
 「(估算值)」)。重试:只对 429/5xx/网络错误指数退避重试 2 次;400/401/402/422
 等请求错误直接失败并给出可操作的中文提示。

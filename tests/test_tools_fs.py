@@ -1,14 +1,22 @@
 """文件四件套工具的外部行为测试:list_files / read_file / write_file / search。
 
-覆盖工单 02 验收:树状忽略目录、深度条数上限、offset/limit、2000 行/100KB
-拒读、拒二进制、密钥 deny-list(可配置,先读后写联动)、新建/覆盖二分、
-父目录自动创建仍走围栏、search ≤50 条带行号。
+覆盖工单 02 验收:树状忽略目录、深度条数上限、offset/limit、拒二进制、
+密钥 deny-list(可配置,先读后写联动)、新建/覆盖二分、父目录自动创建仍走
+围栏、search ≤50 条带行号;工单 03:read_file 按行分页(页脚续读/EOF 无页脚/
+单行超限报错/CJK 不切断/带洞读取仍过先读后写)。
 """
+
+import re
 
 import pytest
 
+from mini_agent.executor import clip_for_model
 from mini_agent.sandbox import FenceError
 from mini_agent.tools.fs import FsContext, make_fs_tools
+
+PAGE_FOOTER_RE = re.compile(
+    r"\n---\n\[第 (\d+)–(\d+) 行 / 共 (\d+) 行;(?P<kind>续读 offset=(?P<next>\d+)|已到文件末尾)\]\n$"
+)
 
 
 @pytest.fixture()
@@ -101,7 +109,10 @@ def test_read_file_offset_and_limit(ctx, tools):
         "\n".join(f"line{i}" for i in range(1, 11)) + "\n", encoding="utf-8"
     )
     out = run_tool(tools, "read_file", path="n.txt", offset=3, limit=2)
-    assert out == "line3\nline4\n"
+    assert out.startswith("line3\nline4\n")
+    # 未到文件末尾:页脚给出行号范围与续读 offset(工单 03)
+    assert PAGE_FOOTER_RE.search(out)
+    assert "共 10 行;续读 offset=5" in out
 
 
 def test_read_file_defaults_read_whole_file(ctx, tools):
@@ -119,31 +130,108 @@ def test_read_file_validates_offset_and_limit(ctx, tools):
         run_tool(tools, "read_file", path="small.txt", limit=0)
 
 
-def test_read_file_refuses_slice_over_2000_lines(ctx, tools):
-    (ctx.repo / "big.txt").write_text(
-        "\n".join(f"l{i}" for i in range(2001)) + "\n", encoding="utf-8"
+def test_read_file_pages_large_file_with_continuation_footer(ctx, tools):
+    # 300 行 × 约 70B ≈ 21KB:首页返回连续整行 + 页脚,整页不触发执行器 8KB 裁剪
+    lines = [f"# 第{i:03d}行 padding {'x' * 50}\n" for i in range(1, 301)]
+    body = "".join(lines)
+    (ctx.repo / "big.txt").write_text(body, encoding="utf-8")
+    out = run_tool(tools, "read_file", path="big.txt")
+    assert clip_for_model(out)[1] is False  # 整页(含页脚)≤ 执行器 8KB 上限
+    m = PAGE_FOOTER_RE.search(out)
+    assert m is not None
+    first, last, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    nxt = int(m.group("next"))
+    assert (first, total) == (1, 300)
+    assert nxt == last + 1  # 续读 offset 可直接执行
+    assert out[: m.start()] == "".join(lines[:last])  # 连续整行,无洞
+
+
+def test_read_file_pagination_walks_to_eof_and_reassembles(ctx, tools):
+    # CJK 行逐页续读到 EOF:拼接等于原文(无洞、无重叠、多字节字符不被切断)
+    lines = [f"def f{i}(): return {'中文内容' * 3}\n" for i in range(400)]
+    body = "".join(lines)
+    (ctx.repo / "cjk.txt").write_text(body, encoding="utf-8")
+    got: list[str] = []
+    offset = 1
+    pages = 0
+    while True:
+        out = run_tool(tools, "read_file", path="cjk.txt", offset=offset)
+        m = PAGE_FOOTER_RE.search(out)
+        pages += 1
+        if m is None:
+            got.append(out)  # 首页即全文:无任何标记,保持精确内容契约
+            break
+        got.append(out[: m.start()])
+        if m.group("kind") == "已到文件末尾":
+            break
+        offset = int(m.group("next"))
+    assert "".join(got) == body
+    assert pages >= 3  # 20KB+ 的文件确实被分了页
+
+
+def test_read_file_final_continuation_page_marks_eof(ctx, tools):
+    # 续读到达末页须有显式 EOF 标记(重跑实证:无标记时末页被连读 3 次);
+    # offset=1 的整读(小文件)不附任何标记
+    (ctx.repo / "n.txt").write_text(
+        "\n".join(f"line{i}" for i in range(1, 11)) + "\n", encoding="utf-8"
     )
+    out = run_tool(tools, "read_file", path="n.txt", offset=3)
+    assert out.startswith("line3\n")
+    assert "[第 3–10 行 / 共 10 行;已到文件末尾]" in out
+    assert run_tool(tools, "read_file", path="n.txt") == (
+        "\n".join(f"line{i}" for i in range(1, 11)) + "\n"
+    )
+
+
+def test_read_file_limit_smaller_than_page_returns_exact_lines(ctx, tools):
+    (ctx.repo / "n.txt").write_text(
+        "\n".join(f"line{i}" for i in range(1, 301)) + "\n", encoding="utf-8"
+    )
+    out = run_tool(tools, "read_file", path="n.txt", offset=10, limit=5)
+    assert out.startswith("line10\nline11\nline12\nline13\nline14\n")
+    assert "第 10–14 行 / 共 300 行;续读 offset=15" in out
+
+
+def test_read_file_offset_beyond_eof_names_total_lines(ctx, tools):
     from mini_agent.tools.base import ToolError
 
-    with pytest.raises(ToolError, match="2000 行"):
-        run_tool(tools, "read_file", path="big.txt")
-    # 分段读取是逃生通道
-    out = run_tool(tools, "read_file", path="big.txt", offset=1, limit=10)
-    assert out.startswith("l0\n")
+    (ctx.repo / "n.txt").write_text("a\nb\n", encoding="utf-8")
+    with pytest.raises(ToolError, match="共 2 行"):
+        run_tool(tools, "read_file", path="n.txt", offset=9999)
 
 
-def test_read_file_refuses_slice_over_100kb(ctx, tools):
-    # 101 行 × 1100 字节 ≈ 111KB,行数远低于 2000,触发字节上限
-    (ctx.repo / "wide.txt").write_text(
-        "\n".join("a" * 1100 for _ in range(101)) + "\n", encoding="utf-8"
-    )
+def test_read_file_empty_file_returns_empty_and_can_be_overwritten(ctx, tools):
+    # 空文件(如空的 __init__.py)是合法文本文件:读到空串并标记已读,否则它会
+    # 因先读后写规则变成既不可读也不可写
     from mini_agent.tools.base import ToolError
 
-    with pytest.raises(ToolError, match="100KB"):
+    (ctx.repo / "empty.py").write_text("", encoding="utf-8")
+    assert run_tool(tools, "read_file", path="empty.py") == ""
+    run_tool(tools, "write_file", path="empty.py", content="x = 1\n")
+    assert (ctx.repo / "empty.py").read_text(encoding="utf-8") == "x = 1\n"
+
+    # 越界语义不变:空文件上 offset>1 仍报超出范围
+    (ctx.repo / "empty2.py").write_text("", encoding="utf-8")
+    with pytest.raises(ToolError, match="超出文件范围"):
+        run_tool(tools, "read_file", path="empty2.py", offset=2)
+
+
+def test_read_file_single_line_over_page_budget_is_error(ctx, tools):
+    # 单行本身超过页预算:明确报错(指明行号与字节数),绝不静默截断半行
+    from mini_agent.tools.base import ToolError
+
+    (ctx.repo / "wide.txt").write_text("x" * 8000 + "\n", encoding="utf-8")
+    with pytest.raises(ToolError, match="超过单页上限"):
         run_tool(tools, "read_file", path="wide.txt")
-    # 用 limit 缩小后可读
-    out = run_tool(tools, "read_file", path="wide.txt", limit=10)
-    assert out.count("\n") == 10
+
+
+def test_read_file_paged_read_still_marks_read_before_write(ctx, tools):
+    # 分页只读了首页也标记已读:先读后写是护栏不是安全边界(DESIGN §2 已知边界)
+    (ctx.repo / "big.txt").write_text("line\n" * 2000, encoding="utf-8")
+    out = run_tool(tools, "read_file", path="big.txt")
+    assert PAGE_FOOTER_RE.search(out)  # 确认确实只读了首页
+    run_tool(tools, "write_file", path="big.txt", content="rewritten\n")
+    assert (ctx.repo / "big.txt").read_text(encoding="utf-8") == "rewritten\n"
 
 
 def test_read_file_refuses_binary(ctx, tools):
@@ -225,15 +313,14 @@ def test_write_existing_file_after_read_is_allowed(ctx, tools):
     assert "覆盖" in out
 
 
-def test_second_write_requires_fresh_read(ctx, tools):
-    from mini_agent.tools.base import ToolError
-
-    run_tool(tools, "write_file", path="fresh.txt", content="v1")
-    with pytest.raises(ToolError, match="先读"):
-        run_tool(tools, "write_file", path="fresh.txt", content="v2")
-    run_tool(tools, "read_file", path="fresh.txt")
-    run_tool(tools, "write_file", path="fresh.txt", content="v3")
-    assert (ctx.repo / "fresh.txt").read_text(encoding="utf-8") == "v3"
+def test_second_write_to_own_new_file_is_allowed(ctx, tools):
+    # 工单 02:自己刚写的文件内容已知,再覆盖不算盲覆盖(失败 3 步骤 17 的教训——
+    # 曾把模型自己 17KB 的重写整个拒掉,模型只好多读 10 行再原样重生成一遍)
+    out1 = run_tool(tools, "write_file", path="fresh.txt", content="v1")
+    assert "新建" in out1
+    out2 = run_tool(tools, "write_file", path="fresh.txt", content="v2")
+    assert (ctx.repo / "fresh.txt").read_text(encoding="utf-8") == "v2"
+    assert "覆盖" in out2
 
 
 def test_write_new_file_path_still_goes_through_fence(ctx, tools):

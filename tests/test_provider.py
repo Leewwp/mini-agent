@@ -49,7 +49,7 @@ def test_request_params_stream_usage_and_thinking_disabled_by_default():
     assert kwargs["stream"] is True
     assert kwargs["stream_options"] == {"include_usage": True}
     assert kwargs["temperature"] == 0.0
-    assert kwargs["max_tokens"] == 8192
+    assert kwargs["max_tokens"] == 32768  # DEFAULT_MAX_TOKENS(providers.py 单一事实源)
     assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}  # thinking 默认显式关闭
 
 
@@ -114,6 +114,20 @@ def test_complete_raises_on_finish_reason_length():
     provider = make_provider(client)
     with pytest.raises(ResponseTruncatedError, match="max_tokens"):
         provider.complete([{"role": "user", "content": "任务"}])
+
+
+def test_truncation_error_is_actionable_and_names_current_limit():
+    # 失败 1 的教训:报错必须指向可执行的出口(--max-tokens)并带上当前值
+    stream = [
+        make_chunk(role="assistant"),
+        make_chunk(content="半截"),
+        make_chunk(finish_reason="length"),
+    ]
+    client = make_stub_client([stream])
+    provider = make_provider(client, max_tokens=8192)
+    with pytest.raises(ResponseTruncatedError, match="--max-tokens") as excinfo:
+        provider.complete([{"role": "user", "content": "任务"}])
+    assert "8192" in str(excinfo.value)
 
 
 # ---------- 重试策略:只对 429/5xx/网络错误,指数退避 2 次 ----------

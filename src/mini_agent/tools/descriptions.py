@@ -26,16 +26,19 @@ ZH_DESCRIPTIONS: dict[str, str] = {
         "超限部分不展开。可用 path 参数指定子目录。"
     ),
     "read_file": (
-        "读取 UTF-8 文本文件内容,支持 offset(起始行号,从 1 计)与 limit(行数)"
-        "分段读取。单次读取上限 2000 行或 100KB,超限会被拒,请用 offset/limit 分段;"
-        "二进制文件与密钥文件(.env、*.pem、id_rsa* 等)拒绝读取。"
-        "注意:write_file 覆盖已存在文件前,必须先用本工具读过该文件(先读后写)。"
+        "读取 UTF-8 文本文件,按行分页:每次返回连续的整行(一页约 8KB);未读到"
+        "文件末尾时,结果尾部会附页脚「[第 a–b 行 / 共 N 行;续读 offset=b+1]」,"
+        "照它续读即可确定性地读完任意大文件,续读到达末页时会标明「已到文件末尾」。"
+        "支持 offset(起始行号,从 1 计)与 limit(行数)。二进制文件与密钥文件"
+        "(.env、*.pem、id_rsa* 等)拒绝读取;单行超过单页上限的文件无法按整行"
+        "返回,会明确报错(请改用 search 定位)。注意:write_file 覆盖已存在文件前,"
+        "该文件须在本次运行中读过或写过(先读后写)。"
     ),
     "write_file": (
         "整文件写入(不是局部 patch,必须提供完整文件内容)。新建文件允许,"
-        "父目录不存在时自动创建;覆盖已存在的文件前,必须在本次运行中先用 "
-        "read_file 读取过该文件(先读后写,防止盲覆盖);路径限制在仓库内,"
-        "越界拒绝;密钥文件(.env 等)因拒读而无法被覆盖。"
+        "父目录不存在时自动创建;覆盖已存在的文件前,该文件必须在本次运行中"
+        "读过或由你写入过(先读后写,防止盲覆盖;自己刚写的文件可直接再覆盖);"
+        "路径限制在仓库内,越界拒绝;密钥文件(.env 等)因拒读而无法被覆盖。"
     ),
     "search": (
         "在仓库文本文件中按 Python 正则表达式搜索,返回「相对路径:行号: 行内容」"
@@ -69,17 +72,24 @@ EN_DESCRIPTIONS: dict[str, str] = {
         "`__pycache__`, and `mini-agent-runs`. Depth and entry count are capped."
     ),
     "read_file": (
-        "Read a UTF-8 text file from the repository. Supports offset/limit. "
-        "Rejects binary files, secret files (`.env`, `*.pem`, `id_rsa*`), and reads "
-        "over 2000 lines or 100KB per call. Note: read a file with this tool before "
-        "overwriting it with write_file (read-before-write)."
+        "Read a UTF-8 text file page by page: each call returns consecutive whole "
+        "lines (~8KB per page); until EOF the result ends with a footer like "
+        "'[第 a–b 行 / 共 N 行;续读 offset=b+1]' — follow it to read any file to "
+        "the end deterministically; the final page of a continuation is marked "
+        "'已到文件末尾' (end of file). Supports offset (1-based start line) and "
+        "limit (line count). Rejects binary and secret files (`.env`, `*.pem`, "
+        "`id_rsa*`); a file whose single line exceeds the page cap raises an "
+        "explicit error (use search to locate content instead). Note: before "
+        "write_file overwrites an existing file, it must have been read or written "
+        "earlier in this run (read-before-write)."
     ),
     "write_file": (
         "Write a complete file inside the repository (full content, not a patch). "
-        "You must read an existing file before overwriting it. Creating new files is "
-        "allowed; parent directories are created automatically. Paths are confined to "
-        "the repository; secret files (`.env` etc.) cannot be overwritten because "
-        "they are never readable."
+        "An existing file must have been read — or written by you — earlier in this "
+        "run before overwriting it (files you just wrote can be overwritten again). "
+        "Creating new files is allowed; parent directories are created automatically. "
+        "Paths are confined to the repository; secret files (`.env` etc.) cannot be "
+        "overwritten because they are never readable."
     ),
     "search": (
         "Search repository text with a Python regular expression. Returns up to 50 "

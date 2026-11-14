@@ -41,11 +41,15 @@
    `llm_request`/`llm_response` 事件入日志(含耗时与 token 用量);一次往返计 1 步。
 4. **空转检测**:模型连续 2 轮既不调用工具也不 finish——第 1 轮注入中文提醒,
    第 2 轮直接 `ERROR/model_stalled`,不空转到 MAX_STEPS。
-5. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
+5. **步数预算提醒**(工单 04,仅批处理):步数用至 75% 仍无写入(writer 工具
+   标记)或结束声明(terminal 元数据)时,一次性注入预算提醒 user 消息——
+   空转检测防「不干活」,它防「只读探索耗尽预算」;是否「已产出」只看工具
+   元数据,不按工具名特判。chat 模式不注入(user 消息是轮次边界)。
+6. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
    调用不执行、但每个 tool_call id 都补一条「未执行:超过单轮上限」的 isError
    回执(OpenAI 协议要求每个 id 都有结果,否则下一轮请求非法)。finish 被拒绝后
    本轮剩余调用同样补「未执行」回执。
-6. **终止语义** `_handle_terminal()`:只读工具结果元数据
+7. **终止语义** `_handle_terminal()`:只读工具结果元数据
    (`terminal`/`finish_declared`/`verification_passed`/`unverified_reason`),
    绝不按工具名特判。
 
@@ -87,8 +91,8 @@ LLM 传输层(`providers.py`)的 thinking 开关经 `extra_body` 携带,且仅�
 | 工具 | 文件 | 边界 |
 |---|---|---|
 | `list_files` | `tools/fs.py` | 树状列出;忽略 `.git`/`.venv`/`node_modules`/`__pycache__`/`mini-agent-runs`;深度 ≤8、条数 ≤500 |
-| `read_file` | `tools/fs.py` | 支持 offset/limit;单次 ≤2000 行或 ≤100KB;拒二进制(NUL 嗅探)与非 UTF-8;密钥 deny-list |
-| `write_file` | `tools/fs.py` | 整文件写入;**覆盖已存在文件前必须本次运行读过**;新建允许;父目录自动创建(仍过围栏) |
+| `read_file` | `tools/fs.py` | **按行分页**:每页连续整行 ≤7.5KB+页脚,不触发执行器 8KB 裁剪;offset/limit;页脚给「行号范围/总行数/续读 offset」,续读末页标「已到文件末尾」;拒二进制(NUL 嗅探)与非 UTF-8;密钥 deny-list |
+| `write_file` | `tools/fs.py` | 整文件写入;**覆盖已存在文件前必须本次运行读过或写过**;新建允许;父目录自动创建(仍过围栏) |
 | `search` | `tools/fs.py` | 纯 Python 正则,`相对路径:行号: 行内容`,≤50 条;跳过忽略目录与密钥文件 |
 | `run_command` | `tools/exec.py` | `shlex` 归一化 → 黑名单 → allowlist(黑名单优先);结果**不计入成功判定** |
 | `run_tests` | `tools/exec.py` | 执行 `--test-cmd`(用户显式提供,视为可信,只归一化);唯一 `is_verifier=True` 的工具;每次执行落 `test_run` 事件 |
@@ -107,7 +111,8 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
 `relative_to(root)`,一次性覆盖 `../` 逃逸、仓库外绝对路径、指向仓库外的符号
 链接(含中间目录软链);所有文件工具共享同一围栏。
 
-**先读后写(`tools/fs.py::FsContext`)**:`read_files` 集合只由 `read_file` 标记;
+**先读后写(`tools/fs.py::FsContext`)**:`read_files` 集合由 `read_file` **或
+成功的 `write_file`** 标记——自己刚写的内容不是未知内容,再覆盖不算盲覆盖;
 `write_file` 覆盖已存在文件前查它。被 deny-list 拒读的文件因此也天然无法被覆盖
 ——零额外代码。
 
@@ -123,6 +128,8 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
 
 **结果通道(`executor.py`)**:工具结果对模型上下文截断 ≤8KB(头 2KB + 尾 6KB,
 测试输出偏重尾部),日志存全量;截断与未截断都落 `tool_call`/`tool_result` 事件。
+read_file 的页预算(7.5KB)已保证「整页+页脚」不触发这条裁剪——对文件内容,
+头尾裁剪会挖洞,是错误语义;裁剪仍是其他工具输出(测试/命令)的最后兜底。
 
 ### 为什么这么设计
 
@@ -130,15 +137,21 @@ deepseek-flash 上验证了中文描述稳定(三条演示路径各连续 2 次�
   (run_tests)、辅助执行(run_command)、终止(finish),每个都能向读者用
   一句话讲清。多一个工具就多一分「工具菜单代替设计」的嫌疑。
 - **先读后写,新建例外**:防的是「模型盲覆盖没看过的文件」,不是「模型创建新
-  文件」;这条规则同时让密钥文件免于被覆盖(拒读 ⇒ 没读过 ⇒ 拒写)。
+  文件」;这条规则同时让密钥文件免于被覆盖(拒读 ⇒ 没读过 ⇒ 拒写)。成功写入
+  即视为已知——真实彩排中围栏曾把模型对自己刚建文件的重写整个拒掉,模型只好
+  多读 10 行再原样重生成一遍,纯仪式成本(工单 02)。
 - **run_tests 与 run_command 权限分层**:测试命令是用户显式给的、是成功判定的
   依据,按可信输入处理;run_command 是模型的自由度,必须收在 allowlist 内。两者
   都不改变「只有 run_tests 计入成功判定」。
 - **黑名单短、allowlist 明确**:黑名单是模式匹配,永远列不全;真正兜底的是
   「子进程 env 最小化 + 进程组击杀 + 输出上限」这层工程护栏,以及见 §7 的威胁
   模型定位。
-- **2000 行/100KB 上限作用于「本次返回的分段」**:整文件超限时 offset/limit 是
-  逃生通道,模型可以分段读完任何能读的文件。
+- **read_file 按行分页(工单 03)**:8KB 头尾裁剪对文件内容会挖洞——真实彩排
+  三次失败约 30/66 步花在补读被挖洞的文件上(模型自发用 offset/limit 但不知道
+  洞的行号,只能盲猜),且带洞的读也满足先读后写(隐患:整文件覆盖没见过中段
+  的文件)。分页把限制前移进 read_file:每页连续整行 + 可执行页脚(行号范围/
+  总行数/续读 offset);单行超页预算明确报错,绝不静默截断。先读后写是护栏
+  不是安全边界:分页只保证模型见过返回的页,不跟踪整文件覆盖率。
 
 ## 3. 停止条件(Stopping Conditions)
 
@@ -180,7 +193,9 @@ diff 含 untracked 文件,产物存 `diffs/changes.diff`。**失败不自动回�
 - **`model_stalled` 提前刹车**:空转是错误状态而不是步数问题,给它独立 reason
   让日志一眼可诊断。
 - **`response_truncated` 硬失败**:半截 JSON 的 tool_call arguments 或半截文件
-  内容若被采信,下游会出现"写了一半的文件";宁可明确报错让用户调大 max_tokens。
+  内容若被采信,下游会出现"写了一半的文件";宁可明确报错——报错文案指向
+  `--max-tokens` 并附当前值(默认 32768,单一事实源在 `providers.py`;DeepSeek
+  官方上限 384K,非 DeepSeek 端点输出上限更低时需显式调小)。
 
 ## 4. 结果判断(Result Judgment:声明时复验 Verify-on-Finish)
 

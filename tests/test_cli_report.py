@@ -263,7 +263,7 @@ def test_cli_interrupted_run_prints_report_and_keeps_changes(monkeypatch, tmp_pa
         argparse.Namespace(
             repo=str(repo), task="修复", model="fake:whatever",
             max_steps=20, test_cmd=None, timeout=600,
-            max_context_tokens=60000, thinking=False,
+            max_context_tokens=60000, max_tokens=32768, thinking=False,
         ),
         env={},
     )
