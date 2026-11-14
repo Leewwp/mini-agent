@@ -205,6 +205,11 @@ class ReadFileTool:
         lines = text.splitlines(keepends=True)
         total = len(lines)
         start = (offset or 1) - 1
+        if total == 0 and start == 0:
+            # 空文件是合法文本文件(如空的 __init__.py):返回空串并标记已读,
+            # 否则它会因先读后写规则变成既不可读也不可写
+            self._ctx.read_files.add(path)
+            return ""
         if start >= total:
             hint = f"(有效 offset 1–{total})" if total else "(文件为空)"
             raise ToolError(f"offset={offset} 超出文件范围:文件共 {total} 行{hint}")

@@ -200,6 +200,22 @@ def test_read_file_offset_beyond_eof_names_total_lines(ctx, tools):
         run_tool(tools, "read_file", path="n.txt", offset=9999)
 
 
+def test_read_file_empty_file_returns_empty_and_can_be_overwritten(ctx, tools):
+    # 空文件(如空的 __init__.py)是合法文本文件:读到空串并标记已读,否则它会
+    # 因先读后写规则变成既不可读也不可写
+    from mini_agent.tools.base import ToolError
+
+    (ctx.repo / "empty.py").write_text("", encoding="utf-8")
+    assert run_tool(tools, "read_file", path="empty.py") == ""
+    run_tool(tools, "write_file", path="empty.py", content="x = 1\n")
+    assert (ctx.repo / "empty.py").read_text(encoding="utf-8") == "x = 1\n"
+
+    # 越界语义不变:空文件上 offset>1 仍报超出范围
+    (ctx.repo / "empty2.py").write_text("", encoding="utf-8")
+    with pytest.raises(ToolError, match="超出文件范围"):
+        run_tool(tools, "read_file", path="empty2.py", offset=2)
+
+
 def test_read_file_single_line_over_page_budget_is_error(ctx, tools):
     # 单行本身超过页预算:明确报错(指明行号与字节数),绝不静默截断半行
     from mini_agent.tools.base import ToolError
