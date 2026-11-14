@@ -28,10 +28,11 @@ ZH_DESCRIPTIONS: dict[str, str] = {
     "read_file": (
         "读取 UTF-8 文本文件,按行分页:每次返回连续的整行(一页约 8KB);未读到"
         "文件末尾时,结果尾部会附页脚「[第 a–b 行 / 共 N 行;续读 offset=b+1]」,"
-        "照它续读即可确定性地读完任意大文件。支持 offset(起始行号,从 1 计)与 "
-        "limit(行数)。二进制文件与密钥文件(.env、*.pem、id_rsa* 等)拒绝读取;"
-        "单行超过单页上限的文件无法按整行返回,会明确报错(请改用 search 定位)。"
-        "注意:write_file 覆盖已存在文件前,该文件须在本次运行中读过或写过(先读后写)。"
+        "照它续读即可确定性地读完任意大文件,续读到达末页时会标明「已到文件末尾」。"
+        "支持 offset(起始行号,从 1 计)与 limit(行数)。二进制文件与密钥文件"
+        "(.env、*.pem、id_rsa* 等)拒绝读取;单行超过单页上限的文件无法按整行"
+        "返回,会明确报错(请改用 search 定位)。注意:write_file 覆盖已存在文件前,"
+        "该文件须在本次运行中读过或写过(先读后写)。"
     ),
     "write_file": (
         "整文件写入(不是局部 patch,必须提供完整文件内容)。新建文件允许,"
@@ -74,12 +75,13 @@ EN_DESCRIPTIONS: dict[str, str] = {
         "Read a UTF-8 text file page by page: each call returns consecutive whole "
         "lines (~8KB per page); until EOF the result ends with a footer like "
         "'[第 a–b 行 / 共 N 行;续读 offset=b+1]' — follow it to read any file to "
-        "the end deterministically. Supports offset (1-based start line) and limit "
-        "(line count). Rejects binary and secret files (`.env`, `*.pem`, `id_rsa*`); "
-        "a file whose single line exceeds the page cap raises an explicit error "
-        "(use search to locate content instead). Note: before write_file overwrites "
-        "an existing file, it must have been read or written earlier in this run "
-        "(read-before-write)."
+        "the end deterministically; the final page of a continuation is marked "
+        "'已到文件末尾' (end of file). Supports offset (1-based start line) and "
+        "limit (line count). Rejects binary and secret files (`.env`, `*.pem`, "
+        "`id_rsa*`); a file whose single line exceeds the page cap raises an "
+        "explicit error (use search to locate content instead). Note: before "
+        "write_file overwrites an existing file, it must have been read or written "
+        "earlier in this run (read-before-write)."
     ),
     "write_file": (
         "Write a complete file inside the repository (full content, not a patch). "

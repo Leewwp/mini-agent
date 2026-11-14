@@ -15,7 +15,7 @@ from mini_agent.sandbox import FenceError
 from mini_agent.tools.fs import FsContext, make_fs_tools
 
 PAGE_FOOTER_RE = re.compile(
-    r"\n---\n\[第 (\d+)–(\d+) 行 / 共 (\d+) 行;续读 offset=(\d+)\]\n$"
+    r"\n---\n\[第 (\d+)–(\d+) 行 / 共 (\d+) 行;(?P<kind>续读 offset=(?P<next>\d+)|已到文件末尾)\]\n$"
 )
 
 
@@ -139,7 +139,8 @@ def test_read_file_pages_large_file_with_continuation_footer(ctx, tools):
     assert clip_for_model(out)[1] is False  # 整页(含页脚)≤ 执行器 8KB 上限
     m = PAGE_FOOTER_RE.search(out)
     assert m is not None
-    first, last, total, nxt = (int(g) for g in m.groups())
+    first, last, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    nxt = int(m.group("next"))
     assert (first, total) == (1, 300)
     assert nxt == last + 1  # 续读 offset 可直接执行
     assert out[: m.start()] == "".join(lines[:last])  # 连续整行,无洞
@@ -158,12 +159,28 @@ def test_read_file_pagination_walks_to_eof_and_reassembles(ctx, tools):
         m = PAGE_FOOTER_RE.search(out)
         pages += 1
         if m is None:
-            got.append(out)  # 末页无页脚,保持精确内容契约
+            got.append(out)  # 首页即全文:无任何标记,保持精确内容契约
             break
         got.append(out[: m.start()])
-        offset = int(m.group(4))
+        if m.group("kind") == "已到文件末尾":
+            break
+        offset = int(m.group("next"))
     assert "".join(got) == body
     assert pages >= 3  # 20KB+ 的文件确实被分了页
+
+
+def test_read_file_final_continuation_page_marks_eof(ctx, tools):
+    # 续读到达末页须有显式 EOF 标记(重跑实证:无标记时末页被连读 3 次);
+    # offset=1 的整读(小文件)不附任何标记
+    (ctx.repo / "n.txt").write_text(
+        "\n".join(f"line{i}" for i in range(1, 11)) + "\n", encoding="utf-8"
+    )
+    out = run_tool(tools, "read_file", path="n.txt", offset=3)
+    assert out.startswith("line3\n")
+    assert "[第 3–10 行 / 共 10 行;已到文件末尾]" in out
+    assert run_tool(tools, "read_file", path="n.txt") == (
+        "\n".join(f"line{i}" for i in range(1, 11)) + "\n"
+    )
 
 
 def test_read_file_limit_smaller_than_page_returns_exact_lines(ctx, tools):

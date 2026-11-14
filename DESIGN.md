@@ -91,7 +91,7 @@ LLM 传输层(`providers.py`)的 thinking 开关经 `extra_body` 携带,且仅�
 | 工具 | 文件 | 边界 |
 |---|---|---|
 | `list_files` | `tools/fs.py` | 树状列出;忽略 `.git`/`.venv`/`node_modules`/`__pycache__`/`mini-agent-runs`;深度 ≤8、条数 ≤500 |
-| `read_file` | `tools/fs.py` | **按行分页**:每页连续整行 ≤7.5KB+页脚,不触发执行器 8KB 裁剪;offset/limit;页脚给「行号范围/总行数/续读 offset」;拒二进制(NUL 嗅探)与非 UTF-8;密钥 deny-list |
+| `read_file` | `tools/fs.py` | **按行分页**:每页连续整行 ≤7.5KB+页脚,不触发执行器 8KB 裁剪;offset/limit;页脚给「行号范围/总行数/续读 offset」,续读末页标「已到文件末尾」;拒二进制(NUL 嗅探)与非 UTF-8;密钥 deny-list |
 | `write_file` | `tools/fs.py` | 整文件写入;**覆盖已存在文件前必须本次运行读过或写过**;新建允许;父目录自动创建(仍过围栏) |
 | `search` | `tools/fs.py` | 纯 Python 正则,`相对路径:行号: 行内容`,≤50 条;跳过忽略目录与密钥文件 |
 | `run_command` | `tools/exec.py` | `shlex` 归一化 → 黑名单 → allowlist(黑名单优先);结果**不计入成功判定** |

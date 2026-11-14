@@ -230,6 +230,11 @@ class ReadFileTool:
         if last < total:
             # 页脚 = 可执行的续读指引:行号范围 / 总行数 / 下一页 offset
             content += f"\n---\n[第 {start + 1}–{last} 行 / 共 {total} 行;续读 offset={last + 1}]\n"
+        elif start > 0:
+            # 续读到达末页:无标记时模型无法区分「读完了」与「还有更多」
+            # (重跑实证:DESIGN.md 末页被连读 3 次才被自行断定读完);
+            # 首页即全文(小文件,offset=1)不附任何标记,保持精确内容契约
+            content += f"\n---\n[第 {start + 1}–{last} 行 / 共 {total} 行;已到文件末尾]\n"
         self._ctx.read_files.add(path)  # 先读后写标记(护栏非安全边界,不跟踪覆盖率)
         return content
 
