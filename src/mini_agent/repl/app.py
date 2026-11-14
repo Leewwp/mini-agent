@@ -8,7 +8,9 @@
 - Ctrl+C 输入态 = 清空当前行不退出;生成态 = 中断本轮(03 补回执)回输入;
 - 任意状态第一次 Ctrl+C 按其语义处理,**2 秒内**第二次 SIGINT = /exit
   (窗口常量集中定义,时钟可注入);超窗重新计;
-- Ctrl+D(EOF)= /exit;空输入忽略;未知斜杠命令仅提示 /help。
+- Ctrl+D(EOF)= /exit;空输入忽略;未知斜杠命令仅提示 /help;
+- /connect 会话内提供 API Key:密钥经独立密码式输入(不回显、不进输入
+  历史),拒绝内联参数;未连接时普通消息与 /compact 被拦截提示。
 """
 
 from __future__ import annotations
@@ -41,6 +43,9 @@ class ReplApp:
         stderr: TextIO | None = None,
         on_new: Callable[[], None] | None = None,
         on_compact: Callable[[str], None] | None = None,
+        on_connect: Callable[[str], None] | None = None,
+        secret_input_fn: Callable[[], str] | None = None,
+        is_connected: Callable[[], bool] | None = None,
         on_exit: Callable[[], None] | None = None,
         banner: str | None = None,
         patch_stdout: bool = False,
@@ -61,6 +66,9 @@ class ReplApp:
         )
         self._on_new = on_new
         self._on_compact = on_compact
+        self._on_connect = on_connect
+        self._secret_input_fn = secret_input_fn
+        self._is_connected = is_connected
         self._on_exit = on_exit
         self._banner = banner
         self._patch_stdout = patch_stdout
@@ -102,6 +110,9 @@ class ReplApp:
             return False  # 空输入忽略
         if text.startswith("/"):
             return self._dispatch_command(text)
+        if self._is_connected is not None and not self._is_connected():
+            self._print(self._palette.yellow("尚未连接模型服务:请先输入 /connect 提供 API Key"))
+            return False
         self._run_turn(text)
         return False
 
@@ -120,6 +131,9 @@ class ReplApp:
             return False
         if command == "/compact":
             self._do_compact(arg.strip())
+            return False
+        if command == "/connect":
+            self._do_connect(arg.strip())
             return False
         self._print(self._palette.yellow("未知命令,/help 查看可用命令"))
         return False
@@ -158,6 +172,9 @@ class ReplApp:
         if self._on_compact is None:
             self._print(self._palette.yellow("当前会话不支持 /compact"))
             return
+        if self._is_connected is not None and not self._is_connected():
+            self._print(self._palette.yellow("尚未连接模型服务:/compact 需要先 /connect 提供 API Key"))
+            return
         self._spinner.start("正在压缩…")
         try:
             self._on_compact(instructions)
@@ -168,6 +185,36 @@ class ReplApp:
             self._print(self._palette.red(f"压缩失败:{exc}"))
         finally:
             self._spinner.stop()
+
+    # -- /connect(密钥经注入的 secret_input_fn 读取;成功反馈由编排层输出) --
+
+    def _do_connect(self, arg: str) -> None:
+        if self._on_connect is None:
+            self._print(self._palette.yellow("当前会话不支持 /connect"))
+            return
+        if arg:  # 拒绝内联:密钥会留在输入历史与终端回滚里
+            self._print(self._palette.yellow(
+                "请勿在命令后内联密钥(会留在输入历史与屏幕回滚中);"
+                "直接输入 /connect,再按提示粘贴"
+            ))
+            return
+        if self._secret_input_fn is None:
+            self._print(self._palette.yellow("当前输入通道不支持密钥输入,无法 /connect"))
+            return
+        self._print(self._palette.gray("请粘贴 API Key(输入不回显;直接回车取消):"))
+        try:
+            key = self._secret_input_fn().strip()
+        except KeyboardInterrupt:
+            self._record_sigint()  # 计入双击 Ctrl+C 窗口,与输入态语义一致
+            self._print(self._palette.yellow("已取消,未修改连接状态"))
+            return
+        except EOFError:
+            self._print(self._palette.yellow("已取消,未修改连接状态"))
+            return
+        if not key:
+            self._print(self._palette.yellow("已取消,未修改连接状态"))
+            return
+        self._on_connect(key)
 
     # -- 双击 Ctrl+C 窗口 --
 

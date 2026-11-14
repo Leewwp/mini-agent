@@ -564,6 +564,7 @@ class AgentLoop:
             outcome = self._execute_turn(resp, steps)
             if outcome is not None:
                 return self._as_turn_outcome(outcome)
+            self._maybe_remind_budget(steps)
             if self._verification_rejected and steps >= self._max_steps:
                 # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(与批处理一致)
                 return self._turn_outcome(
@@ -750,28 +751,42 @@ class AgentLoop:
     # -- 一轮工具执行(≤8,按序;超出补「未执行」结果) --
 
     def _maybe_remind_budget(self, steps: int) -> None:
-        """批处理一次性预算提醒:步数用至 75% 仍无写入或结束声明时注入。
+        """一次性预算提醒(75%):批处理注入 user 消息,chat 走 on_activity 展示行。
 
-        只防「过度准备耗尽预算」(真实彩排失败 2 的教训——stall 检测防空转,
-        不防只读探索);复用 stall 提醒的 user 消息注入通道;「是否已产出」只看
-        工具元数据(is_writer / terminal),不按工具名特判。chat 模式不注入:
-        user 消息是轮次边界,注入会干扰 turn 分组裁剪与 /compact 切点。
+        批处理:只防「过度准备耗尽预算」(真实彩排失败 2 的教训——stall 检测
+        防空转,不防只读探索);复用 stall 提醒的 user 消息注入通道;「是否已
+        产出」只看工具元数据(is_writer / terminal),不按工具名特判。
+        chat:不注入 user 消息(轮次边界,会干扰 turn 分组裁剪与 /compact
+        切点),改经 on_activity 打一行展示——纯预算知情,不施压:读码/讲解
+        类任务的大量只读是合法工作量,且 REPL 到上限后输入「继续」可带完整
+        历史接续;已写入也不豁免(与批处理不同,用户需要知道还剩多少)。
         """
-        if self._chat_mode or self._budget_reminded or self._produced:
+        if self._budget_reminded:
             return
         threshold = math.ceil(self._max_steps * BUDGET_REMINDER_RATIO)
-        if threshold <= steps < self._max_steps:
+        if not (threshold <= steps < self._max_steps):
+            return
+        if self._chat_mode:
             self._budget_reminded = True
-            self._messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"预算提醒:已用 {steps}/{self._max_steps} 步,"
-                        "尚未产生写入或结束声明。请优先落地产物或如实 finish;"
-                        "继续只读探索将耗尽步数。"
-                    ),
-                }
-            )
+            if self._on_activity is not None:
+                self._on_activity(
+                    f"预算提醒:本轮已用 {steps}/{self._max_steps} 步;"
+                    "到上限后输入「继续」可带完整历史接续"
+                )
+            return
+        if self._produced:
+            return
+        self._budget_reminded = True
+        self._messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"预算提醒:已用 {steps}/{self._max_steps} 步,"
+                    "尚未产生写入或结束声明。请优先落地产物或如实 finish;"
+                    "继续只读探索将耗尽步数。"
+                ),
+            }
+        )
 
     def _execute_turn(self, resp: LLMResponse, step: int) -> RunOutcome | None:
         """执行本轮全部工具调用;返回 RunOutcome 表示循环就此终止。"""

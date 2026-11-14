@@ -373,3 +373,92 @@ def test_banner_printed_once():
     app, _, _ = make_app(["/exit"], script, banner="mini-agent 交互会话(输入 /help 查看命令)")
     app.run()
     assert out_text(app).startswith("mini-agent 交互会话")
+
+
+# ---------------------------------------------------------------------------
+# /connect:密钥输入、内联拒绝、未连接拦截
+# ---------------------------------------------------------------------------
+
+
+def test_connect_reads_secret_input_and_calls_handler():
+    connect_calls = []
+    script = [turn("ok", TurnState.REPLIED)]
+    app, _, _ = make_app(
+        ["/connect", "hi", "/exit"],
+        script,
+        on_connect=connect_calls.append,
+        secret_input_fn=lambda: "  sk-test-only  ",
+        is_connected=lambda: bool(connect_calls),
+    )
+    app.run()
+    assert connect_calls == ["sk-test-only"]  # 密钥去空白后回调
+    text = out_text(app)
+    assert "sk-test-only" not in text  # 密钥不回显到终端输出
+    assert "✓ 已回复" in text  # 连接后普通消息放行
+
+
+def test_connect_rejects_inline_argument():
+    connect_calls = []
+    app, _, _ = make_app(
+        ["/connect sk-leak-me", "/exit"], [],
+        on_connect=connect_calls.append,
+        secret_input_fn=lambda: "sk-should-not-be-asked",
+    )
+    app.run()
+    assert connect_calls == []  # 内联密钥被拒绝,不触达回调
+    assert "内联" in out_text(app)
+
+
+def test_connect_empty_or_interrupted_secret_cancels():
+    connect_calls = []
+    app, _, _ = make_app(
+        ["/connect", "/connect", "/exit"], [],
+        on_connect=connect_calls.append,
+        secret_input_fn=lambda: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+    app.run()
+    assert connect_calls == []
+    assert out_text(app).count("已取消,未修改连接状态") == 2
+
+    app2, _, _ = make_app(
+        ["/connect", "/exit"], [],
+        on_connect=connect_calls.append,
+        secret_input_fn=lambda: "   ",  # 空白 = 取消
+    )
+    app2.run()
+    assert connect_calls == []
+    assert "已取消,未修改连接状态" in out_text(app2)
+
+
+def test_connect_without_handler_or_secret_input_hints():
+    app, _, _ = make_app(["/connect", "/exit"], [])
+    app.run()
+    assert "当前会话不支持 /connect" in out_text(app)
+
+    app2, _, _ = make_app(
+        ["/connect", "/exit"], [],
+        on_connect=lambda key: None,  # 有回调但没有密钥输入通道
+    )
+    app2.run()
+    assert "当前输入通道不支持密钥输入" in out_text(app2)
+
+
+def test_plain_turn_and_compact_blocked_until_connected():
+    connected = []
+    compact_calls = []
+    script = [turn("ok", TurnState.REPLIED)]
+    app, _, _ = make_app(
+        ["hi", "/compact 聚焦", "/connect", "hi", "/compact 聚焦", "/exit"],
+        script,
+        on_compact=compact_calls.append,
+        on_connect=lambda key: connected.append(key),
+        secret_input_fn=lambda: "sk-test",
+        is_connected=lambda: bool(connected),
+    )
+    app.run()
+    text = out_text(app)
+    # 未连接:普通消息与 /compact 均被拦截(不跑轮次、不压历史)
+    assert text.count("尚未连接") == 2
+    # 连接后放行:第二轮 hi 正常跑轮、/compact 正常触达回调
+    assert "✓ 已回复" in text
+    assert compact_calls == ["聚焦"]

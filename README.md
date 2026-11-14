@@ -31,8 +31,9 @@ agent (Claude Code, Codex CLI, …): the only SDKs in the dependency tree are th
 - 7 tools: `list_files` / `read_file` / `write_file` / `search` / `run_command` /
   `run_tests` / `finish`.
 - **Interactive REPL**: inline-scrolling Claude Code-style session — streaming replies,
-  colored tool-result lines, spinner, `/help` `/new` `/compact` `/exit` slash commands,
-  per-turn status lines, double-Ctrl+C to exit.
+  colored tool-result lines, spinner, `/help` `/connect` `/new` `/compact` `/exit` slash
+  commands, per-turn status lines, double-Ctrl+C to exit. `/connect` supplies the API key
+  in-session (masked input; memory-only — never persisted to disk, history, or logs).
 - **Project memory**: repo-root `AGENTS.md` injected into the system prompt (REPL-only,
   32KiB cap, append-don't-overwrite guidance).
 - **Manual compaction**: `/compact` replaces old history with an LLM semantic summary +
@@ -127,8 +128,9 @@ uv venv && uv pip install -e ".[dev]"
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-export MINI_AGENT_API_KEY=sk-...   # required for the REPL too (fail-fast exit 5 without it;
-                                   # --model fake: works with no key). See "Model configuration".
+export MINI_AGENT_API_KEY=sk-...   # required for batch (--task; fail-fast exit 5 without it).
+                                   # The REPL starts without a key — run /connect there instead.
+                                   # --model fake: works with no key. See "Model configuration".
 ```
 
 ### Interactive REPL (primary usage)
@@ -149,6 +151,7 @@ happen with visible results, and use slash commands:
 | Command | Meaning |
 |---|---|
 | `/help` | show the command table |
+| `/connect` | supply the API key in-session (masked input; memory-only, never written to disk/history/logs; running it again rotates the key) |
 | `/new` (alias `/clear`) | start a fresh session: clear history, reload `AGENTS.md`, rotate log & snapshot |
 | `/compact [focus]` | compact the conversation into a semantic summary + the last 2 turns |
 | `/exit` | write the session report (`report.md` + diff evidence) and exit (also Ctrl+D or double Ctrl+C within 2s) |
@@ -250,7 +253,7 @@ exclusive (exit 5).
 | `--resume` | none | Session directory to resume (new dir is written, old log read-only). Bare `--resume` lists the 3 most recent sessions for this repo and exits. |
 | `--runs-dir` | `~/.mini-agent/sessions` | REPL session root (batch keeps `./mini-agent-runs` + temp fallback). |
 | `--verbose` | off | REPL tool-result lines show full output instead of the summary line. |
-| `--max-steps` | `20` | Step budget. One LLM round-trip counts as one step. Per-turn in the REPL. |
+| `--max-steps` | `20` batch / `50` REPL | Step budget. One LLM round-trip counts as one step. Per-turn in the REPL; at 75% a one-shot reminder line is shown, and after hitting the cap typing "继续" (continue) resumes with full history. |
 | `--test-cmd` | none | The repository's pre-configured test command (e.g. `pytest -q`). Without it, success cannot be verified (→ `UNVERIFIED`). |
 | `--model` | `deepseek-flash` | Model name, or `fake:<script.json>` to inject the scripted FakeModel (no key, no network). |
 | `--timeout` | `600` | Overall deadline in seconds. Per-turn in the REPL. |
@@ -266,7 +269,7 @@ Model configuration via environment (precedence: flag > env > default):
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `MINI_AGENT_API_KEY` | — | API key. Required in both batch and REPL unless `--model fake:` is used (REPL fails fast with exit 5). |
+| `MINI_AGENT_API_KEY` | — | API key. Required for batch (`--task`, fail-fast exit 5). The REPL starts without it: plain messages are gated until `/connect` supplies the key in-session (memory-only). `--model fake:` needs no key. |
 | `MINI_AGENT_BASE_URL` | `https://api.deepseek.com` | Any OpenAI-compatible endpoint (DeepSeek verified; Zhipu/MiniMax best-effort). |
 | `MINI_AGENT_MODEL` | `deepseek-flash` | Model name override. |
 | `MINI_AGENT_TOOL_DESC_LANG` | `zh` | Tool-description language: `zh` (default) or `en` (hot backup). Swaps only the seven tool descriptions — behavior and parameter schemas unchanged; the language in use is recorded in `session_meta`. |
@@ -383,7 +386,7 @@ messages verbatim — trimming and compaction are both reversible from the log a
 ## Testing
 
 ```bash
-uv run --extra dev pytest -q   # 336 tests; no API key, no network, no TTY
+uv run --extra dev pytest -q   # 345 tests; no API key, no network, no TTY
 ```
 
 The only test seam is the Provider boundary: a scripted FakeModel streams chunks shaped

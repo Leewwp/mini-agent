@@ -31,7 +31,7 @@ def clean_env(monkeypatch):
 
 def test_argparse_full_param_set_and_defaults():
     args = build_arg_parser().parse_args(["--repo", "r", "--task", "t"])
-    assert args.max_steps == 20
+    assert args.max_steps is None  # argparse 层不落默认;resolve_config 按模式落(批 20 / REPL 50)
     assert args.test_cmd is None
     assert args.model is None
     assert args.timeout == 600
@@ -51,6 +51,22 @@ def test_argparse_full_param_set_and_defaults():
     assert full.model == "deepseek-v4-pro" and full.timeout == 120
     assert full.max_context_tokens == 30000 and full.thinking is True
     assert full.max_tokens == 65536
+
+
+def test_max_steps_mode_defaults_and_flag_override(monkeypatch, tmp_path):
+    """--max-steps 缺省按模式取默认:批处理 20 / REPL 每轮 50;显式 flag 覆盖两者。"""
+    clean_env(monkeypatch)
+    batch = resolve_config(make_args(tmp_path), env={"MINI_AGENT_API_KEY": "k"})
+    assert batch.max_steps == 20  # 批处理基线不动
+    repl = resolve_config(
+        build_arg_parser().parse_args(["--repo", str(tmp_path)]), env={}
+    )
+    assert repl.max_steps == 50  # REPL:读码/讲解类任务的合法工作量
+    repl_flag = resolve_config(
+        build_arg_parser().parse_args(["--repo", str(tmp_path), "--max-steps", "80"]),
+        env={},
+    )
+    assert repl_flag.max_steps == 80
 
 
 def test_help_copy_is_chinese():

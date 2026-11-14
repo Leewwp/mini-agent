@@ -31,8 +31,9 @@ mini-agent 是一个从零自研的本地编码 Agent:输入仓库路径与自�
 
 `AgentLoop.run()` 是一个手写的 while 循环,每轮:
 
-1. **预算检查**:步数达到 `--max-steps`(默认 20)→ `MAX_STEPS/steps_exhausted`;
-   单调时钟(可注入)超过 `--timeout`(默认 600s)→ `TIMEOUT/deadline_exceeded`。
+1. **预算检查**:步数达到 `--max-steps`(默认按模式:批处理 20 / REPL 每轮 50)
+   → `MAX_STEPS/steps_exhausted`;单调时钟(可注入)超过 `--timeout`(默认 600s)
+   → `TIMEOUT/deadline_exceeded`。
 2. **历史裁剪** `_maybe_trim()`:上一响应的 `usage.prompt_tokens` 超过
    `--max-context-tokens`(默认 60000)时,把最老的若干个交互组
    (「assistant(tool_calls) + 其全部 tool 结果」)整组替换为一条中文摘要文本;
@@ -41,10 +42,13 @@ mini-agent 是一个从零自研的本地编码 Agent:输入仓库路径与自�
    `llm_request`/`llm_response` 事件入日志(含耗时与 token 用量);一次往返计 1 步。
 4. **空转检测**:模型连续 2 轮既不调用工具也不 finish——第 1 轮注入中文提醒,
    第 2 轮直接 `ERROR/model_stalled`,不空转到 MAX_STEPS。
-5. **步数预算提醒**(工单 04,仅批处理):步数用至 75% 仍无写入(writer 工具
-   标记)或结束声明(terminal 元数据)时,一次性注入预算提醒 user 消息——
-   空转检测防「不干活」,它防「只读探索耗尽预算」;是否「已产出」只看工具
-   元数据,不按工具名特判。chat 模式不注入(user 消息是轮次边界)。
+5. **步数预算提醒**(工单 04;批注入 / chat 展示):步数用至 75% 时一次性提醒——
+   批处理:仍无写入(writer 工具标记)或结束声明(terminal 元数据)则注入
+   预算提醒 user 消息(空转检测防「不干活」,它防「只读探索耗尽预算」;
+   是否「已产出」只看工具元数据,不按工具名特判)。chat(REPL):不注入
+   user 消息(轮次边界,会干扰 turn 分组裁剪与 /compact 切点),改经
+   on_activity 打一行展示,已写入也不豁免(预算知情,不是催促;到上限后
+   输入「继续」可带完整历史接续)。
 6. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
    调用不执行、但每个 tool_call id 都补一条「未执行:超过单轮上限」的 isError
    回执(OpenAI 协议要求每个 id 都有结果,否则下一轮请求非法)。finish 被拒绝后

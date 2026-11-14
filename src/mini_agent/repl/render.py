@@ -141,6 +141,7 @@ def tool_result_line(result: ToolResult, *, palette: Palette, verbose: bool = Fa
 
 HELP_ROWS = [
     ("/help", "显示本帮助", "/help"),
+    ("/connect", "会话内提供 API Key(隐藏输入,不落盘不写日志)", "/connect"),
     ("/new", "开启新会话(清空历史、重载 AGENTS.md)", "/new"),
     ("/exit", "退出并生成会话终报", "/exit"),
     ("/compact", "压缩上下文为语义摘要(可带聚焦指令)", "/compact 只保留测试相关上下文"),

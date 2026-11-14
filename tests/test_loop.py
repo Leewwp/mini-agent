@@ -639,3 +639,73 @@ def test_budget_reminder_skipped_after_finish_attempt(tmp_path):
     assert outcome.state == "TESTS_FAILED"  # 复验被拒后步数耗尽(既有语义)
     requests = llm_events(events, "llm_request")
     assert all(budget_reminders_in(r) == 0 for r in requests)
+
+
+# ---------------------------------------------------------------------------
+# chat 预算提醒(REPL):75% 经 on_activity 打展示行,不注入历史
+# ---------------------------------------------------------------------------
+
+
+def run_chat_turn(tmp_path, repo, turns_payload, *, max_steps, activity):
+    """单轮 chat AgentLoop(镜像 REPL 每轮新实例的装配);on_activity 收集展示行。"""
+    provider = create_provider(f"fake:{write_script(tmp_path, turns_payload)}")
+    logger = SessionLogger(tmp_path / "runs")
+    registry = build_default_registry(repo, emit=logger.emit)
+    executor = ToolExecutor(registry=registry, logger=logger)
+    loop = AgentLoop(
+        provider=provider,
+        executor=executor,
+        logger=logger,
+        system_prompt=SYSTEM_PROMPT,
+        task=None,
+        chat_mode=True,
+        initial_messages=[{"role": "system", "content": SYSTEM_PROMPT}],
+        max_steps=max_steps,
+        on_activity=activity.append,
+    )
+    try:
+        outcome = loop.run_turn("读一下仓库")
+        events = [
+            json.loads(line)
+            for line in logger.path.read_text(encoding="utf-8").splitlines()
+        ]
+    finally:
+        logger.close()
+    return outcome, events
+
+
+def test_chat_budget_reminder_is_display_line_not_history(tmp_path):
+    """chat 75%:提醒经 on_activity 打一行(含「继续」指引),user 消息零注入。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    read = {"tool_calls": [{"name": "list_files", "arguments": {}}]}
+    activity: list[str] = []
+    outcome, events = run_chat_turn(
+        tmp_path, repo,
+        {"turns": [read] * 7 + [{"text": "读完了。"}]},
+        max_steps=8, activity=activity,
+    )
+    assert outcome.state == "REPLIED"  # 提醒不改轮末语义
+    reminders = [line for line in activity if "预算提醒" in line]
+    assert len(reminders) == 1  # 一次性
+    assert "6/8" in reminders[0] and "继续" in reminders[0]
+    requests = llm_events(events, "llm_request")
+    assert all(budget_reminders_in(r) == 0 for r in requests)  # 历史零注入
+
+
+def test_chat_budget_reminder_fires_even_after_write(tmp_path):
+    """chat:已写入仍提醒(与批处理不同——预算知情,不是催促产出)。"""
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    write = {
+        "tool_calls": [
+            {"name": "write_file", "arguments": {"path": "out.txt", "content": "x"}}
+        ]
+    }
+    read = {"tool_calls": [{"name": "list_files", "arguments": {}}]}
+    activity: list[str] = []
+    outcome, _ = run_chat_turn(
+        tmp_path, repo,
+        {"turns": [write] + [read] * 6 + [{"text": "好了。"}]},
+        max_steps=8, activity=activity,
+    )
+    assert outcome.state == "REPLIED"
+    assert any("预算提醒" in line for line in activity)

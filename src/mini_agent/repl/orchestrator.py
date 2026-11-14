@@ -23,6 +23,7 @@ from typing import TextIO
 
 from mini_agent.executor import ToolExecutor
 from mini_agent.loop import AgentLoop, TurnOutcome
+from mini_agent.providers import LLMProvider, create_provider
 from mini_agent.repl.render import ReplRenderer
 from mini_agent.report import (
     SessionSummary,
@@ -177,6 +178,7 @@ class ChatSession:
     - ``turn_end.messages`` = 本轮结束后完整模型视图(06 的恢复数据源);
     - /new 轮换 logger+快照、重置 messages/usage、重载记忆;分段改动累积,
       /exit 报告合并全部段;
+    - Provider 可后连:无 key 启动时为 None,``connect``(/connect)会话内重建;
     - /exit(/含 Ctrl+D/双击 Ctrl+C)与会话异常共用同一报告出口。
     """
 
@@ -184,7 +186,7 @@ class ChatSession:
         self,
         *,
         config,
-        provider,
+        provider: LLMProvider | None,
         output: TextIO,
         runs_dir: Path | None = None,
         resume_messages: list[dict] | None = None,
@@ -219,6 +221,36 @@ class ChatSession:
     @property
     def session_dir(self) -> Path:
         return self._segments[-1].logger.session_dir
+
+    @property
+    def provider(self) -> LLMProvider | None:
+        """当前 Provider;/connect 之前为 None(装配层据此拦截轮次)。"""
+        return self._provider
+
+    def connect(self, api_key: str) -> None:
+        """REPL /connect:会话内提供 API Key 并立即重建 Provider。
+
+        密钥只进内存:不落盘、不写会话日志(provider_connected 事件仅记录
+        model / base_url,遵守"日志不记录 API key"红线);已连接时再次
+        /connect = 换 Key 重建,下轮生效。
+        """
+        self._config.api_key = api_key
+        self._provider = create_provider(
+            self._config.model,
+            api_key=api_key,
+            base_url=self._config.base_url,
+            temperature=self._config.temperature,
+            max_tokens=self._config.max_tokens,
+            thinking=self._config.thinking,
+        )
+        display_base_url = (
+            "fake" if self._config.model.startswith("fake:") else self._config.base_url
+        )
+        self._segments[-1].logger.emit(
+            "provider_connected", model=self._config.model, base_url=display_base_url
+        )
+        self._output.write(f"已连接 {self._config.model} · {display_base_url}\n")
+        self._output.flush()
 
     def _reload_memory(self) -> None:
         if self._load_memory is not None:  # 注入加载器(测试/定制)
@@ -303,6 +335,8 @@ class ChatSession:
     # -- 轮次(ReplApp 的 run_turn_fn) --
 
     def turn(self, user_message: str, renderer: ReplRenderer) -> TurnOutcome:
+        if self._provider is None:  # 防御:装配层应在未连接时拦截轮次
+            raise RuntimeError("未连接 Provider:请先用 /connect 提供 API Key")
         segment = self._segments[-1]
         executor = ToolExecutor(registry=self._registry, logger=segment.logger)
         loop = AgentLoop(
@@ -408,7 +442,7 @@ class ChatSession:
             completion_tokens=self.usage.completion_tokens,
             total_tokens=self.usage.total_tokens,
             compact_tokens=self.usage.compact_tokens,
-            model=self._provider.model,
+            model=self._provider.model if self._provider is not None else self._config.model,
             resumed_from=self._resumed_from,
         )
         session_dir = self._segments[-1].logger.session_dir

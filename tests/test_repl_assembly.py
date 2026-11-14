@@ -174,11 +174,53 @@ def test_mode_dispatch_task_runs_batch_unchanged(tmp_path, capsys):
     assert "终报" in out and "TESTS_FAILED" in out
 
 
-def test_repl_requires_key_fail_fast(monkeypatch, tmp_path):
+def test_repl_without_key_enters_and_awaits_connect(monkeypatch, tmp_path, capsys):
+    """无 key 启动 REPL:不再 exit 5,进入会话等待 /connect;普通消息被拦截。"""
     monkeypatch.delenv("MINI_AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("MINI_AGENT_MODEL", raising=False)
     repo = make_repo(tmp_path)
-    code = main(["--repo", str(repo)])  # 无 --task → REPL;真实模型无 key → exit 5
-    assert code == 5
+    monkeypatch.setattr("sys.stdin", io.StringIO("你好\n/exit\n"))
+    code = main(["--repo", str(repo), "--runs-dir", str(tmp_path / "runs")])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "未连接模型服务" in out and "/connect" in out  # banner 引导
+    assert "尚未连接" in out  # 普通消息被拦,不触达 Provider
+    session_dir = next((tmp_path / "runs" / repo_slug(repo)).iterdir())
+    kinds = [e["type"] for e in read_events(session_dir)]
+    assert "turn_start" not in kinds  # 未连接不产生轮次
+    assert (session_dir / "report.md").exists()  # 无 Provider 退出终报正常
+
+
+def test_connect_in_session_builds_provider_and_unlocks_turns(tmp_path, monkeypatch, capsys):
+    """/connect 全链路:密钥重建 Provider → 轮次放行;密钥不进任何落盘产物。"""
+    repo = make_repo(tmp_path, files={"README.md": "x"})
+    script_path = write_script(tmp_path, {"turns": [{"text": "已连接后的回复。"}]})
+    monkeypatch.delenv("MINI_AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("MINI_AGENT_MODEL", raising=False)
+
+    def fake_create(model_spec, **kwargs):
+        assert kwargs.get("api_key") == "sk-test-only"  # /connect 的密钥传达到位
+        return create_provider(f"fake:{script_path}")  # 测试注入 FakeModel,无网络
+
+    monkeypatch.setattr("mini_agent.repl.orchestrator.create_provider", fake_create)
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO("/connect\nsk-test-only\n你好\n/exit\n")
+    )
+    code = main(["--repo", str(repo), "--runs-dir", str(tmp_path / "runs")])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "未连接模型服务" in out  # 启动时 banner 提示未连接
+    assert "已连接 deepseek-flash" in out and "https://api.deepseek.com" in out
+    assert "已连接后的回复。" in out and "✓ 已回复" in out
+    session_dir = next((tmp_path / "runs" / repo_slug(repo)).iterdir())
+    events = read_events(session_dir)
+    kinds = [e["type"] for e in events]
+    assert "provider_connected" in kinds  # 审计事件(model/base_url,无密钥)
+    assert "turn_start" in kinds
+    raw = "\n".join(
+        p.read_text(encoding="utf-8") for p in session_dir.glob("*.jsonl")
+    ) + "\n" + (session_dir / "report.md").read_text(encoding="utf-8")
+    assert "sk-test-only" not in raw  # 密钥不落盘、不进终报
 
 
 def test_bare_command_enters_repl_via_main(tmp_path, monkeypatch, capsys):

@@ -27,7 +27,9 @@ mini-agent --repo /tmp/tags-repo-demo --test-cmd "pytest -q"
 - 7 个工具:`list_files` / `read_file` / `write_file` / `search` / `run_command` /
   `run_tests` / `finish`。
 - **交互式 REPL**:Claude Code 式行内滚动会话——流式回复、着色工具结果行、
-  spinner、`/help` `/new` `/compact` `/exit` 斜杠命令、每轮状态行、双击 Ctrl+C 退出。
+  spinner、`/help` `/connect` `/new` `/compact` `/exit` 斜杠命令、每轮状态行、双击
+  Ctrl+C 退出。`/connect` 会话内提供 API Key(隐藏输入;只存内存,不落盘、不进
+  输入历史与日志)。
 - **项目记忆**:repo 根 `AGENTS.md` 启动期注入 system prompt(仅 REPL;32KiB 上限;
   「追加写、不覆盖」引导)。
 - **手动压缩**:`/compact` 用 LLM 语义摘要 + 最近 2 个完整轮次整体替换旧历史,
@@ -114,8 +116,9 @@ uv venv && uv pip install -e ".[dev]"
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-export MINI_AGENT_API_KEY=sk-...   # REPL 同样必须有 key(无 key 快速失败退出码 5;
-                                   # --model fake: 例外)。换端点见下表。
+export MINI_AGENT_API_KEY=sk-...   # 批处理(--task)必填,无 key 快速失败退出码 5;
+                                   # REPL 可不设,进入会话后用 /connect 提供。
+                                   # --model fake: 例外。换端点见下表。
 ```
 
 ### 交互式 REPL(主推用法)
@@ -135,6 +138,7 @@ uv run --project /path/to/mini-agent mini-agent --test-cmd "pytest -q"
 | 命令 | 含义 |
 |---|---|
 | `/help` | 显示命令表 |
+| `/connect` | 会话内提供 API Key(隐藏输入;只存内存,不落盘、不进输入历史与日志;再次执行即换 Key) |
 | `/new`(别名 `/clear`) | 开新会话:清空历史、重载 `AGENTS.md`、轮换日志与快照 |
 | `/compact [聚焦指令]` | 把对话压缩为语义摘要 + 最近 2 个完整轮次 |
 | `/exit` | 写会话终报(report.md + diff 凭证)并退出(Ctrl+D 或 2 秒内双击 Ctrl+C 同效) |
@@ -233,7 +237,7 @@ REPL;裸命令 → 交互式 REPL。`--task` 与 `--resume` 互斥(退出码 5)�
 | `--resume` | 无 | 要恢复的会话目录(新目录续写,旧日志只读);裸 `--resume` 列出该仓库最近 3 个会话后退出 |
 | `--runs-dir` | `~/.mini-agent/sessions` | REPL 会话根目录(批处理保持 `./mini-agent-runs` + 临时目录回退) |
 | `--verbose` | 关 | REPL 工具结果行显示完整输出(默认摘要行) |
-| `--max-steps` | `20` | 步数预算;一次 LLM 往返计 1 步;REPL 中为每轮预算 |
+| `--max-steps` | 批处理 `20` / REPL `50` | 步数预算;一次 LLM 往返计 1 步;REPL 中为每轮预算,用至 75% 会有一次性提醒行,到上限后输入「继续」可带完整历史接续 |
 | `--test-cmd` | 无 | 预配置测试命令(如 `pytest -q`);缺省时成功无法验证(→ `UNVERIFIED`) |
 | `--model` | `deepseek-flash` | 模型名;或 `fake:<script.json>` 注入脚本化 FakeModel(无 key、无网络) |
 | `--timeout` | `600` | 整体超时秒数;REPL 中为每轮预算 |
@@ -249,7 +253,7 @@ REPL 退出码:`/exit`(含 Ctrl+D / 2 秒内双击 Ctrl+C)→ 0,最后轮次失�
 
 | 环境变量 | 默认值 | 含义 |
 |---|---|---|
-| `MINI_AGENT_API_KEY` | — | API key;批处理与 REPL 均必填(除 `--model fake:`;REPL 无 key 快速失败退出码 5) |
+| `MINI_AGENT_API_KEY` | — | API key;批处理(`--task`)必填(无 key 快速失败退出码 5)。REPL 可不设:启动后普通消息被拦截,直到 `/connect` 会话内提供(只存内存)。`--model fake:` 无需 key |
 | `MINI_AGENT_BASE_URL` | `https://api.deepseek.com` | 任意 OpenAI 兼容端点(DeepSeek 已验证;智谱/MiniMax 尽力支持) |
 | `MINI_AGENT_MODEL` | `deepseek-flash` | 模型名覆盖 |
 | `MINI_AGENT_TOOL_DESC_LANG` | `zh` | 工具描述语言:`zh`(默认)或 `en`(热备);只换七条工具描述文案,行为与参数 schema 不动,当前语言记入 `session_meta` |
@@ -354,7 +358,7 @@ API key 与请求头。事件类型:批处理八类,
 ## 测试
 
 ```bash
-uv run --extra dev pytest -q   # 336 个测试;无 key、无网络、无 TTY
+uv run --extra dev pytest -q   # 345 个测试;无 key、无网络、无 TTY
 ```
 
 唯一测试接缝在 Provider 边界:脚本化 FakeModel 按真实 DeepSeek 流式分片规律吐

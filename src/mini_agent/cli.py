@@ -44,7 +44,8 @@ from mini_agent.tools.descriptions import descriptions_for
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_MAX_STEPS = 20
+DEFAULT_MAX_STEPS = 20  # 批处理默认(行为基线,不动)
+DEFAULT_REPL_MAX_STEPS = 50  # REPL 每轮默认:读码/讲解类任务大量只读是合法工作量
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_CONTEXT_TOKENS = 60000
 DEFAULT_TOOL_DESC_LANG = "zh"
@@ -97,8 +98,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="REPL 工具结果行显示完整输出(默认摘要行)",
     )
     parser.add_argument(
-        "--max-steps", type=int, default=DEFAULT_MAX_STEPS,
-        help="最大步数(一次 LLM 往返计 1 步,默认 20;REPL 中为每轮预算)",
+        "--max-steps", type=int, default=None,
+        help="最大步数(一次 LLM 往返计 1 步;默认:批处理 20 / REPL 每轮 50,"
+        "REPL 到上限后输入「继续」可接续)",
     )
     parser.add_argument(
         "--test-cmd", default=None,
@@ -151,11 +153,19 @@ def resolve_repo(args: argparse.Namespace) -> Path:
 
 
 def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
-    """装配配置:校验 --repo、解析模型三件套(MINI_AGENT_API_KEY / _BASE_URL / _MODEL)。"""
+    """装配配置:校验 --repo、解析模型三件套(MINI_AGENT_API_KEY / _BASE_URL / _MODEL)。
+
+    key 强校验仅限批处理(--task,无法中途补);REPL 允许无 key 启动,
+    进入会话后用 /connect 提供(Provider 延迟构造)。
+    """
     env = env if env is not None else os.environ
     repo = resolve_repo(args)
     if not repo.is_dir():
         raise ConfigError(f"--repo 路径不存在或不是目录:{args.repo}")
+    if args.max_steps is None:
+        # 按模式取默认:批处理 20(基线)/ REPL 每轮 50(交互=用户即预算,
+        # 读码讲解类任务的合法工作量远超 20;业界:OpenHands 100、mini-SWE-agent 250)
+        args.max_steps = DEFAULT_REPL_MAX_STEPS if args.task is None else DEFAULT_MAX_STEPS
     if args.max_steps < 1:
         raise ConfigError(f"--max-steps 必须不小于 1,收到:{args.max_steps}")
     if args.timeout < 1:
@@ -170,10 +180,12 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     api_key = env.get("MINI_AGENT_API_KEY") or None
     tool_desc_lang = env.get("MINI_AGENT_TOOL_DESC_LANG") or DEFAULT_TOOL_DESC_LANG
     descriptions_for(tool_desc_lang)  # 启动期校验(未知语言立即报配置错误)
-    if not model.startswith("fake:") and not api_key:
+    if not model.startswith("fake:") and not api_key and args.task is not None:
+        # 批处理无法中途补 key,启动即拒;REPL 放宽为会话内 /connect 提供
         raise ConfigError(
             "未配置 API key:请设置环境变量 MINI_AGENT_API_KEY"
             "(模型服务地址可用 MINI_AGENT_BASE_URL 覆盖,模型名可用 MINI_AGENT_MODEL 覆盖);"
+            "交互会话(REPL)可省略,进入后用 /connect 提供;"
             "或使用 --model fake:<script.json> 在无 key 环境复现"
         )
     return Config(
@@ -319,6 +331,8 @@ def run_repl(
     )
     interactive = bool(input_stream.isatty() and output.isatty())
     if interactive:
+        from prompt_toolkit import prompt as secret_prompt
+
         from mini_agent.repl.prompt import PROMPT_TEXT, build_prompt_session
         from mini_agent.repl.waiting import WaitingSpinner
 
@@ -327,18 +341,30 @@ def run_repl(
         def input_fn() -> str:
             return prompt_session.prompt(PROMPT_TEXT)
 
+        def secret_input() -> str:
+            # 密钥输入:独立密码式提示,不挂 FileHistory(密钥绝不进输入历史)
+            return secret_prompt("API Key: ", is_password=True)
+
         def spinner_factory(text: str):
             return WaitingSpinner(text)
 
         patch_stdout_flag = True
     else:
         input_fn = make_plain_input(input_stream)
+
+        def secret_input() -> str:
+            # 非交互(测试/管道):按行读,不经带回显的 input()
+            line = input_stream.readline()
+            if line == "":
+                raise EOFError
+            return line.rstrip("\n")
+
         spinner_factory = None
         patch_stdout_flag = False
-    banner = (
-        f"mini-agent 交互会话 · 模型 {config.model} · 仓库 {config.repo.name}\n"
-        "直接输入消息开始对话;/help 查看命令;Ctrl+D 或双击 Ctrl+C 退出并生成会话终报"
-    )
+    banner = f"mini-agent 交互会话 · 模型 {config.model} · 仓库 {config.repo.name}"
+    if provider is None:
+        banner += "\n未连接模型服务:输入 /connect 提供 API Key(隐藏输入,不落盘、不写日志)"
+    banner += "\n直接输入消息开始对话;/help 查看命令;Ctrl+D 或双击 Ctrl+C 退出并生成会话终报"
     app = ReplApp(
         run_turn_fn=session.turn,
         output=output,
@@ -348,6 +374,9 @@ def run_repl(
         show_reasoning=config.thinking,
         on_new=session.new_session,
         on_compact=session.compact,  # /compact(工单 13):spinner/中断反馈由 ReplApp 管
+        on_connect=session.connect,  # /connect:会话内提供 API Key,原地重建 Provider
+        secret_input_fn=secret_input,
+        is_connected=lambda: session.provider is not None,
         on_exit=session.finish,
         banner=banner,
         patch_stdout=patch_stdout_flag,
@@ -391,14 +420,18 @@ def main(argv: list[str] | None = None) -> int:
             for message in warnings:
                 print(f"[会话恢复] {message}")
         config = resolve_config(args)
-        provider = create_provider(
-            config.model,
-            api_key=config.api_key,
-            base_url=config.base_url,
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
-            thinking=config.thinking,
-        )
+        provider = None
+        if config.api_key or config.model.startswith("fake:"):
+            # 有 key 或 FakeModel 才立即构造;REPL 无 key 启动 → /connect 时重建
+            # (批处理到达此处时必已通过 resolve_config 的 key 强校验,不会是 None)
+            provider = create_provider(
+                config.model,
+                api_key=config.api_key,
+                base_url=config.base_url,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                thinking=config.thinking,
+            )
     except ConfigError as exc:
         print(f"[配置错误] {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
