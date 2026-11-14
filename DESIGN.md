@@ -180,7 +180,9 @@ diff 含 untracked 文件,产物存 `diffs/changes.diff`。**失败不自动回�
 - **`model_stalled` 提前刹车**:空转是错误状态而不是步数问题,给它独立 reason
   让日志一眼可诊断。
 - **`response_truncated` 硬失败**:半截 JSON 的 tool_call arguments 或半截文件
-  内容若被采信,下游会出现"写了一半的文件";宁可明确报错让用户调大 max_tokens。
+  内容若被采信,下游会出现"写了一半的文件";宁可明确报错——报错文案指向
+  `--max-tokens` 并附当前值(默认 32768,单一事实源在 `providers.py`;DeepSeek
+  官方上限 384K,非 DeepSeek 端点输出上限更低时需显式调小)。
 
 ## 4. 结果判断(Result Judgment:声明时复验 Verify-on-Finish)
 

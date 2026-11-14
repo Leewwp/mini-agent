@@ -92,6 +92,11 @@ class LLMResponse:
     finish_reason: str | None = None
 
 
+# 单次响应输出上限默认值(单一事实源):DeepSeek 官方上限 384K,取宽裕默认;
+# 其他 OpenAI 兼容端点输出上限更低时,用 --max-tokens 显式调小
+DEFAULT_MAX_TOKENS = 32768
+
+
 class ProviderError(Exception):
     """Provider 调用失败(循环转 ERROR 终态)。"""
 
@@ -219,7 +224,7 @@ def assemble_response(events: Iterable[ProviderEvent]) -> LLMResponse:
     if finish_reason == "length":
         raise ResponseTruncatedError(
             "模型输出因 max_tokens 上限被截断(finish_reason=length),"
-            "内容不完整,已丢弃:请调大 max_tokens 或缩小任务后重试"
+            "内容不完整,已丢弃:请用 --max-tokens 调大输出上限或缩小任务后重试"
         )
     text = "".join(text_parts)
     reasoning = "".join(reasoning_parts)
@@ -312,7 +317,7 @@ class OpenAICompatProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 8192,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         thinking: bool = False,
         client: object | None = None,
         retry_delays: tuple[float, ...] = (1.0, 2.0),
@@ -367,7 +372,11 @@ class OpenAICompatProvider:
                 events.append(event)
                 if on_event is not None:
                     on_event(event)
-        return assemble_response(events)
+        try:
+            return assemble_response(events)
+        except ResponseTruncatedError as exc:
+            # 报错带上当前上限,让"调大 --max-tokens"建议可直接执行
+            raise ResponseTruncatedError(f"{exc}(当前 max_tokens={self._max_tokens})") from exc
 
     def _create_with_retry(self, kwargs: dict):
         """执行 create,按分类重试;重试次数 = len(retry_delays)。"""
@@ -573,7 +582,7 @@ def create_provider(
     api_key: str | None = None,
     base_url: str | None = None,
     temperature: float = 0.0,
-    max_tokens: int = 8192,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     thinking: bool = False,
 ) -> LLMProvider:
     """按 --model 取值构造 Provider:``fake:<script.json>`` 注入 FakeModel,

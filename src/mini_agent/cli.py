@@ -24,6 +24,7 @@ from mini_agent.errors import EXIT_CONFIG_ERROR, EXIT_ERROR, ConfigError
 from mini_agent.executor import ToolExecutor
 from mini_agent.loop import SYSTEM_PROMPT, AgentLoop
 from mini_agent.providers import (
+    DEFAULT_MAX_TOKENS,
     ProviderError,
     ReasoningDelta,
     TextDelta,
@@ -43,7 +44,6 @@ from mini_agent.tools.descriptions import descriptions_for
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_MAX_TOKENS = 8192
 DEFAULT_MAX_STEPS = 20
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_CONTEXT_TOKENS = 60000
@@ -117,6 +117,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="历史裁剪阈值,单位 token(默认 60000)",
     )
     parser.add_argument(
+        "--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+        help="单次响应输出 token 上限(默认 32768;非 DeepSeek 端点输出上限更低时需显式调小)",
+    )
+    parser.add_argument(
         "--thinking", action="store_true",
         help="开启模型思考模式(reasoning 内容仅展示,不参与上下文)",
     )
@@ -158,6 +162,8 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
         raise ConfigError(f"--timeout 必须不小于 1 秒,收到:{args.timeout}")
     if args.max_context_tokens < 1:
         raise ConfigError(f"--max-context-tokens 必须为正数,收到:{args.max_context_tokens}")
+    if args.max_tokens < 1:
+        raise ConfigError(f"--max-tokens 必须不小于 1,收到:{args.max_tokens}")
 
     model = args.model or env.get("MINI_AGENT_MODEL") or DEFAULT_MODEL
     base_url = env.get("MINI_AGENT_BASE_URL") or DEFAULT_BASE_URL
@@ -180,6 +186,7 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
         test_cmd=args.test_cmd,
         timeout=args.timeout,
         max_context_tokens=args.max_context_tokens,
+        max_tokens=args.max_tokens,
         thinking=args.thinking,
         tool_desc_lang=tool_desc_lang,
         runs_dir=getattr(args, "runs_dir", None),

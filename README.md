@@ -238,7 +238,7 @@ raw.split(","),未处理空白与空标签。……修复后 6 个用例全部�
 ```
 mini-agent [--repo <path>] [--task <text>] [--resume [SESSION_DIR]] [--runs-dir DIR]
            [--verbose] [--max-steps N] [--test-cmd CMD] [--model NAME]
-           [--timeout SECONDS] [--max-context-tokens N] [--thinking]
+           [--timeout SECONDS] [--max-context-tokens N] [--max-tokens N] [--thinking]
 ```
 
 Mode dispatch: `--task` → one-shot batch (unchanged); `--resume <dir>` → resume a session
@@ -257,6 +257,7 @@ exclusive (exit 5).
 | `--model` | `deepseek-flash` | Model name, or `fake:<script.json>` to inject the scripted FakeModel (no key, no network). |
 | `--timeout` | `600` | Overall deadline in seconds. Per-turn in the REPL. |
 | `--max-context-tokens` | `60000` | History-trim threshold, in tokens (triggered by the previous response's `usage.prompt_tokens`). |
+| `--max-tokens` | `32768` | Per-response output cap. DeepSeek's documented maximum is 384K; lower it explicitly on endpoints with a smaller output cap. |
 | `--thinking` | off | Enable model thinking mode. Reasoning is displayed (stderr, dimmed in REPL) only — it never enters the message history. |
 
 REPL exit codes: `/exit` (incl. Ctrl+D / double Ctrl+C) → 0 even if the last turn failed;
@@ -275,7 +276,9 @@ Model configuration via environment (precedence: flag > env > default):
 Runtime dependencies: `openai` (Apache-2.0) and `prompt_toolkit` (BSD-3-Clause; REPL input
 box). Third-party code reuse and licenses: [NOTICE](NOTICE).
 
-Other request defaults (from `cli.py`): `temperature=0.0`, `max_tokens=8192`, streaming
+Other request defaults (from `cli.py` / `providers.py`): `temperature=0.0`,
+`max_tokens=32768` (tunable via `--max-tokens`; a truncated response fails honestly as
+`ERROR/response_truncated`, naming the current cap), streaming
 always on, `stream_options.include_usage=true` (token usage falls back to an estimate,
 marked `(估算值)` in the report, when the provider omits it). Retries: only 429/5xx/network
 errors, exponential backoff, 2 retries; request errors (400/401/402/422 …) fail fast with
