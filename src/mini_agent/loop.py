@@ -14,6 +14,8 @@
   ToolRegistry 取标记为 verifier 的工具重跑;
 - 连续 2 轮无工具调用也不 finish:第 1 轮注入中文提醒,第 2 轮
   ERROR(model_stalled),不空转到 MAX_STEPS;
+- 步数预算提醒(仅批处理):步数用至 75% 仍无写入或结束声明时,一次性注入
+  预算提醒——空转检测防「不干活」,它防「只读探索耗尽预算」;
 - 历史裁剪按「assistant(tool_calls) + 全部对应 tool 结果」整组替换为
   一条摘要文本,绝不单独删 tool 结果;阈值用上一响应 usage.prompt_tokens
   触发,context_trim 事件入日志、可还原。
@@ -22,6 +24,7 @@
 from __future__ import annotations
 
 import enum
+import math
 import secrets
 import time
 from collections import Counter
@@ -158,6 +161,9 @@ SYSTEM_PROMPT = """\
 
 MAX_TOOL_CALLS_PER_TURN = 8
 MIN_KEPT_GROUPS = 2  # 历史裁剪时保底保留的最近交互组数(turn 模式=最近 2 个 user 轮次)
+
+# 步数预算提醒(工单 04):批处理下步数用至 75% 仍无写入/结束声明时一次性注入
+BUDGET_REMINDER_RATIO = 0.75
 
 # /compact 语义摘要 user 消息的固定前缀(工单 13 / 设计票 04)。常量在 loop.py
 # 定义仅为避免循环导入;语义归属压缩机制:turn 分组裁剪按它识别受保护头部。
@@ -459,6 +465,8 @@ class AgentLoop:
         self._verification_rejected = False
         self._last_prompt_tokens: int | None = None
         self._steps = 0  # 已完成计数(中断路径终报用;run() 内同步)
+        self._produced = False  # 已调用 writer 工具或 terminal(finish)声明
+        self._budget_reminded = False  # 一次性预算提醒(仅批处理)
 
     @property
     def messages(self) -> list[dict]:
@@ -507,6 +515,7 @@ class AgentLoop:
             outcome = self._execute_turn(resp, steps)
             if outcome is not None:
                 return outcome
+            self._maybe_remind_budget(steps)
             if self._verification_rejected and steps >= self._max_steps:
                 # finish(success) 复验失败被拒后步数耗尽 → TESTS_FAILED(spec)
                 return self._finish_run(FinalState.TESTS_FAILED, "verification_failed", steps)
@@ -740,10 +749,36 @@ class AgentLoop:
 
     # -- 一轮工具执行(≤8,按序;超出补「未执行」结果) --
 
+    def _maybe_remind_budget(self, steps: int) -> None:
+        """批处理一次性预算提醒:步数用至 75% 仍无写入或结束声明时注入。
+
+        只防「过度准备耗尽预算」(真实彩排失败 2 的教训——stall 检测防空转,
+        不防只读探索);复用 stall 提醒的 user 消息注入通道;「是否已产出」只看
+        工具元数据(is_writer / terminal),不按工具名特判。chat 模式不注入:
+        user 消息是轮次边界,注入会干扰 turn 分组裁剪与 /compact 切点。
+        """
+        if self._chat_mode or self._budget_reminded or self._produced:
+            return
+        threshold = math.ceil(self._max_steps * BUDGET_REMINDER_RATIO)
+        if threshold <= steps < self._max_steps:
+            self._budget_reminded = True
+            self._messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"预算提醒:已用 {steps}/{self._max_steps} 步,"
+                        "尚未产生写入或结束声明。请优先落地产物或如实 finish;"
+                        "继续只读探索将耗尽步数。"
+                    ),
+                }
+            )
+
     def _execute_turn(self, resp: LLMResponse, step: int) -> RunOutcome | None:
         """执行本轮全部工具调用;返回 RunOutcome 表示循环就此终止。"""
         calls = resp.tool_calls
         for index, call in enumerate(calls):
+            if self._registry.is_writer(call.name):
+                self._produced = True  # writer 工具被调用即视为进入产出阶段
             if index >= MAX_TOOL_CALLS_PER_TURN:
                 result = self._executor.skip(
                     call, step=step, reason="未执行:超过单轮上限(8 个工具调用)"
@@ -754,6 +789,7 @@ class AgentLoop:
                 result = self._executor.run(call, step=step)
                 self._notify_tool_result(result)
             if result.terminal:
+                self._produced = True  # 结束声明已出现,预算提醒失去对象
                 outcome = self._handle_terminal(call, result, step)
                 if outcome is not None:
                     return outcome

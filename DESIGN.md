@@ -41,11 +41,15 @@
    `llm_request`/`llm_response` 事件入日志(含耗时与 token 用量);一次往返计 1 步。
 4. **空转检测**:模型连续 2 轮既不调用工具也不 finish——第 1 轮注入中文提醒,
    第 2 轮直接 `ERROR/model_stalled`,不空转到 MAX_STEPS。
-5. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
+5. **步数预算提醒**(工单 04,仅批处理):步数用至 75% 仍无写入(writer 工具
+   标记)或结束声明(terminal 元数据)时,一次性注入预算提醒 user 消息——
+   空转检测防「不干活」,它防「只读探索耗尽预算」;是否「已产出」只看工具
+   元数据,不按工具名特判。chat 模式不注入(user 消息是轮次边界)。
+6. **工具执行** `_execute_turn()`:单轮 ≤8 个调用,按模型给出的顺序执行;超出的
    调用不执行、但每个 tool_call id 都补一条「未执行:超过单轮上限」的 isError
    回执(OpenAI 协议要求每个 id 都有结果,否则下一轮请求非法)。finish 被拒绝后
    本轮剩余调用同样补「未执行」回执。
-6. **终止语义** `_handle_terminal()`:只读工具结果元数据
+7. **终止语义** `_handle_terminal()`:只读工具结果元数据
    (`terminal`/`finish_declared`/`verification_passed`/`unverified_reason`),
    绝不按工具名特判。
 

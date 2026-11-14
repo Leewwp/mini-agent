@@ -242,6 +242,7 @@ class ReadFileTool:
 class WriteFileTool:
     name = "write_file"
     description = ZH_DESCRIPTIONS["write_file"]
+    is_writer = True  # 产出落盘产物:步数预算提醒据此识别「已进入产出阶段」(工单 04)
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {

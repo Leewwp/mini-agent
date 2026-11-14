@@ -629,3 +629,26 @@ def test_batch_run_smoke_unchanged(tmp_path):
     assert outcome.state.value == "TESTS_FAILED"
     assert outcome.exit_code == 1
     assert events[-1]["type"] == "final_report"  # 批处理照常发终报
+
+
+# ---------------------------------------------------------------------------
+# 步数预算提醒(工单 04):chat 模式不注入——user 消息是轮次边界,
+# 注入会干扰 turn 分组裁剪与 /compact 切点
+# ---------------------------------------------------------------------------
+
+
+def test_run_turn_never_injects_budget_reminder(tmp_path):
+    repo = make_repo(tmp_path, files={"README.md": "# demo\n"})
+    turns = {"turns": [{"tool_calls": [{"name": "list_files", "arguments": {}}]}] * 12}
+    outcome, events, _ = run_chat_turn(
+        tmp_path,
+        repo,
+        turns,
+        chat_history(),
+        max_steps=12,  # 阈值 75% = 9 步:批处理下早已提醒,chat 必须零注入
+    )
+    assert outcome.state == TurnState.MAX_STEPS
+    for request in events_of(events, "llm_request"):
+        assert all(
+            "预算提醒" not in (m.get("content") or "") for m in request["messages"]
+        )

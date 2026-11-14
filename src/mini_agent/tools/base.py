@@ -51,6 +51,10 @@ class Tool(Protocol):
     可选属性 ``is_verifier``(默认 False):标记该工具是验证工具
     (其结果计入成功判定)。循环做 finish(success) 复验时,向
     ToolRegistry 取全部 verifier 工具重跑——不硬编码工具名。
+
+    可选属性 ``is_writer``(默认 False):标记该工具产出落盘产物
+    (如 write_file)。循环的步数预算提醒据此判断「是否已进入产出
+    阶段」——同样不硬编码工具名(工单 04)。
     """
 
     @property
@@ -99,6 +103,10 @@ class ToolRegistry:
     def verifiers(self) -> list[Tool]:
         """全部标记为 verifier 的工具(声明时复验重跑它们,不硬编码名字)。"""
         return [tool for tool in self._tools.values() if getattr(tool, "is_verifier", False)]
+
+    def is_writer(self, name: str) -> bool:
+        """该名字的工具是否标记为 writer(产出落盘;预算提醒据此判断)。"""
+        return bool(getattr(self._tools.get(name), "is_writer", False))
 
     def definitions(self) -> list[dict]:
         """导出 OpenAI function calling 的 tools 参数(注册顺序保留)。"""
