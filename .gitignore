@@ -5,9 +5,14 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+.ruff_cache/
 
 # 虚拟环境
 .venv/
+
+# 环境与系统噪声
+.env
+.DS_Store
 
 # 运行产物(会话日志/报告)
 mini-agent-runs/

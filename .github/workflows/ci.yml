@@ -9,9 +9,6 @@
 #   保证「本地与 CI 结果一致」;--frozen 禁止 CI 内解析新版本。
 # - git 身份:干净 runner 无全局 git 配置,涉及影子 git 快照的测试需要可用的
 #   commit 身份,这里全局兜底(快照实现侧另有 -c user.name/-c user.email 兜底)。
-#
-# 状态徽章(README 由工单 07 定稿时挂载,仓库地址届时校对):
-# ![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)
 
 name: CI
 
