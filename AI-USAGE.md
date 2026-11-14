@@ -26,6 +26,10 @@
 入工单。REPL 新增约 100 个测试(FakeModel 驱动、无 TTY、无网络),批处理
 行为与既有测试零改动。
 
+> **工单口径**:本文与 DESIGN.md 提及的「工单 01–11」是开发期内部工作区的
+> 工单序列(各带验收清单与完成记录),原文未随本仓库发布;各工单的结论与
+> 证据已沉淀在 [DESIGN.md](DESIGN.md)、测试套件与提交历史中。
+
 ## 2. 使用的助手与工具清单
 
 | 助手/工具 | 承担的作用 |
@@ -34,7 +38,7 @@
 | 其中的子 Agent 机制 | 实现者子 Agent(每票独立上下文,避免互相污染)、审查子 Agent(方案评审)、merger 子 Agent(合并) |
 | tdd / implement-spec 等技能流程 | 红→绿纪律、spec 驱动的多工单拆分 |
 | curl 直连 DeepSeek API(工单 01 前;REPL 轮补测) | 实测 function calling / 流式分片形状 / thinking 开关 / `finish_reason=length` 行为,结论作为 FakeModel 分片形状的事实基准;2026-11-14 补充实测「连续 user 消息」结构(压缩后历史形态)可用 |
-| deepseek-flash(运行时) | **注意区分**:这是 mini-agent 这个程序运行时所调用的模型,不是开发助手;调用条件与 token 用量按项目要求记入每次终报与 `session.jsonl` |
+| deepseek-flash(运行时) | **注意区分**:这是 mini-agent 这个程序运行时所调用的模型,不是开发助手;调用条件与 token 用量按项目约定记入每次终报与 `session.jsonl` |
 | ruff / pytest / GitHub Actions | 质量门(均由 AI 按工单配置,作者验收) |
 
 ## 3. 作者(人)的角色:决策、复核、方向修正
@@ -53,7 +57,7 @@
   算法题 / 诚实失败)等交付形态。
 
 REPL 轮的关键作者决策(均经逐项拍板,详见设计工单):REPL 成为主推使用方式
-而批处理零改动(项目验收对象);轮次化选「每轮新建实例」形态;`/compact`
+而批处理零改动(核心场景);轮次化选「每轮新建实例」形态;`/compact`
 摘要「user 角色 + system 后最前」的混合方案;记忆只做 AGENTS.md 且 REPL-only;
 实现顺序钉死并设 8h/12h 砍单线(最终均提前达成,未触发降级);英文 DESIGN
 正式不做;`/clear` 做 `/new` 别名;双击 Ctrl+C 窗口 2 秒。
@@ -66,15 +70,15 @@ REPL 轮的关键作者决策(均经逐项拍板,详见设计工单):REPL 成为
 
 - **AI 生成(初稿与迭代均由 AI 完成)**:`src/mini_agent/` 全部源码(含 REPL 轮
   的 `repl/`、`memory.py`、`resume.py` 及 `loop.py` 轮次化改造)、`tests/`
-  全部测试(项目提交时 222 个;REPL 轮后共 323 个;可靠性加固轮后共 336 个——
+  全部测试(首轮交付 222 个;REPL 轮后共 323 个;可靠性加固轮后共 336 个——
   本节修正:早期文档写作「217」时点早于工具描述英文热备等收尾票,以提交历史
-  为准,项目提交基线为 222,REPL 实现新增 101,加固轮新增 13)、`fixtures/` 两个演示仓库及其测试、
+  为准,首轮基线为 222,REPL 实现新增 101,加固轮新增 13)、`fixtures/` 两个演示仓库及其测试、
   `examples/`、`pyproject.toml`、`.github/workflows/ci.yml`、README 双语版、
   DESIGN.md、GLOSSARY.md、AI-USAGE.md、NOTICE、LICENSE 文本(标准 MIT 模板)。
 - **本人改写**:无逐行改写。作者的修改意见(如演示措辞、威胁模型口径、
   「不要写四个接缝全部由 pi-mono 验证」)以决策/复核意见形式提出,由 AI 落笔。
-- **来自项目而非 AI 的内容**:项目需求本身的要求(四要素自研、五要素输出、
-  诚实报告失败)与项目需求示例(normalize_tags 场景)是需求的源头,fixture 的
+- **来自项目需求而非 AI 的内容**:项目目标(四要素自研、五要素输出、
+  诚实报告失败)与示例场景(normalize_tags 修 bug)是需求的源头,fixture 的
   期望行为以需求为准。
 - **第三方代码搬运(合规声明见 [NOTICE](NOTICE))**:`repl/waiting.py` 整文件
   搬运自 Aider-AI/aider 的 `waiting.py`(Apache-2.0,已按 §4(b) 在文件头与
@@ -104,5 +108,5 @@ REPL 轮的关键作者决策(均经逐项拍板,详见设计工单):REPL 成为
 ## 6. 一句话结论
 
 按「谁写的代码」口径,这个仓库是 AI 写的;按「它为什么是这个样子」口径,
-每一个样子都是作者选的。项目中如需追问任何一段实现的为什么,
+每一个样子都是作者选的。如需追问任何一段实现的为什么,
 [DESIGN.md](DESIGN.md) 按四要素逐节给出了答案。

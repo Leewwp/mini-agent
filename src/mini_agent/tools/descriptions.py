@@ -1,6 +1,6 @@
 """七工具描述文案的单一事实源(工单 05 定稿)。
 
-- ``ZH_DESCRIPTIONS``:默认中文描述——对齐项目需求「中文输入中文输出」的演示要求;
+- ``ZH_DESCRIPTIONS``:默认中文描述——对齐「中文输入中文输出」的演示要求;
 - ``EN_DESCRIPTIONS``:英文热备文案,语义与中文逐一校准。若真实模型实测中文
   工具描述导致 function calling 不稳,设 ``MINI_AGENT_TOOL_DESC_LANG=en``
   即整体切换——只换配置,不重写代码。

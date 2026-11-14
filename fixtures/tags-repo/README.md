@@ -1,6 +1,6 @@
 # tags-repo:normalize_tags 修 bug 演示仓库
 
-这是 mini-agent 的内置 fixture 之一,复刻项目需求命令行示例中的场景:
+这是 mini-agent 的内置 fixture 之一,复刻 README 命令行示例中的场景:
 
 ```
 mini-agent --repo ./sample-repo \

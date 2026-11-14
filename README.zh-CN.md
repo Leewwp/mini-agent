@@ -1,7 +1,5 @@
 [English | 中文](README.md)
 
-<!-- 徽章指向 CI 工作流(.github/workflows/ci.yml:ruff + pytest,无 API key、无网络出站)。
-     公开仓库首次推送前该徽章 404 属预期。 -->
 [![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml)
 
 # mini-agent
@@ -12,14 +10,14 @@
 直到测试通过——或者如实报告失败。
 
 ```bash
-# 一次性批处理(项目需求验收对象,行为不变)
+# 一次性批处理(核心场景,行为不变)
 mini-agent --repo /tmp/tags-repo-demo --task "修复 normalize_tags…" --test-cmd "pytest -q"
 
 # 或:交互式 REPL 会话(主推用法——持续对话、工具结果可见)
 mini-agent --repo /tmp/tags-repo-demo --test-cmd "pytest -q"
 ```
 
-这是一个从零自研的迷你编码智能体。项目的核心在于 **任务循环、工具执行边界、停止
+本项目的核心在于 **任务循环、工具执行边界、停止
 条件、结果判断** 四要素全部在本仓库内自研(`src/mini_agent/loop.py` 等)并能逐点
 解释。它**不是**现成 Coding Agent(Claude Code、Codex CLI 等)的包装器:依赖树里
 的 SDK 只有 `openai` 客户端(OpenAI 兼容传输层)与 `prompt_toolkit`(REPL 输入框)。
@@ -45,7 +43,7 @@ mini-agent --repo /tmp/tags-repo-demo --test-cmd "pytest -q"
 - 测试套件**无 API key、无网络、无 TTY** 即可全绿(FakeModel 经
   `--model fake:<script.json>` 注入;REPL 测试全注入式)。
 
-系统提示词、工具描述与界面输出为中文,这是对齐项目需求演示要求的设计决定。
+系统提示词、工具描述与界面输出为中文,这是对齐项目中文演示场景的设计决定。
 
 ## 架构
 
@@ -170,7 +168,7 @@ mini-agent --resume <目录>     # 在新目录续聊(旧日志只读)
 仓库根若有 `AGENTS.md`,其内容(≤32KiB)会注入 system prompt 作为项目指令,
 `/new` 时重载;批处理(`--task`)刻意不受记忆注入影响。
 
-### 一次性批处理(项目需求验收对象)
+### 一次性批处理(核心场景)
 
 ```bash
 cp -r fixtures/tags-repo /tmp/tags-repo-demo
@@ -281,7 +279,7 @@ REPL 退出码:`/exit`(含 Ctrl+D / 2 秒内双击 Ctrl+C)→ 0,最后轮次失�
 
 ## 诚实失败
 
-项目需求要求:失败和无法继续也是合法结果,但必须如实报告。mini-agent 的做法:
+设计原则:失败和无法继续也是合法结果,但必须如实报告。mini-agent 的做法:
 
 - `finish(result="failed")` 是一等公民终态(`TESTS_FAILED` / `model_declared_failure`);
 - `finish(success)` 复验失败会被拒绝并回填输出,模型可继续修复;步数耗尽则
@@ -311,7 +309,7 @@ normalize_tags 仅做 raw.split(","),未去除标签两端空白、未丢弃空�
 三条彩排路径,各连续 2 次真实模型运行结果稳定(2026-11-12,`deepseek-flash`;
 完整记录见 [`fixtures/REHEARSALS.md`](fixtures/REHEARSALS.md)):
 
-1. **`fixtures/tags-repo`**——项目需求同款 `normalize_tags` 修 bug 场景。基线
+1. **`fixtures/tags-repo`**——README 示例同款 `normalize_tags` 修 bug 场景。基线
    3 失败 / 3 通过 → 读实现与测试 → 跑基线 → 修复(strip + 丢弃空标签)→
    6 通过 → 复验 `SUCCESS`,退出码 0;两次均 6 步、~17.6k token。
 2. **`fixtures/algo-repo`**——对着隐藏测试集实现 `spiral_order`(11 个用例,

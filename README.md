@@ -1,8 +1,5 @@
 [English | 中文](README.zh-CN.md)
 
-<!-- Badge pins the CI workflow (.github/workflows/ci.yml: ruff + pytest, no API key, no
-     outbound network). While the repo is private the badge is only visible to viewers
-     with repository access; it becomes public with the repo. -->
 [![CI](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Leewwp/mini-agent/actions/workflows/ci.yml)
 
 # mini-agent
@@ -14,14 +11,14 @@ edits files, runs your pre-configured test command, feeds failures back into the
 conversation, and keeps fixing until the tests pass — or reports honestly that it could not.
 
 ```bash
-# one-shot batch run (core scenario — unchanged)
+# one-shot batch run (core scenario, unchanged)
 mini-agent --repo /tmp/tags-repo-demo --task "修复 normalize_tags…" --test-cmd "pytest -q"
 
 # or: interactive REPL session (primary usage — continuous chat, tools visible)
 mini-agent --repo /tmp/tags-repo-demo --test-cmd "pytest -q"
 ```
 
-This is an self-built coding agent. The point of the project is that the four things an
+The point of this project is that the four things an
 agent must explain — **the task loop, the tool-execution boundary, the stopping conditions,
 and the result judgment** — are implemented from scratch in this repository
 (`src/mini_agent/loop.py` and friends). It is *not* a wrapper around an existing coding
@@ -58,7 +55,7 @@ agent (Claude Code, Codex CLI, …): the only SDKs in the dependency tree are th
   and never need a TTY.
 
 The CLI conversation layer (prompts, tool descriptions, terminal output) is in Chinese by
-design — this matches the original the project's demo requirements.
+design — this matches the project's Chinese-first demo scenario.
 
 ## Architecture
 
@@ -302,7 +299,7 @@ is a CLI-level configuration error, not a loop state.
 
 ## Honest failure is a legal outcome
 
-The design principle is plain: failure and inability to continue are legal results, but
+A core design principle: failure and inability to continue are legal results, but
 they must be reported truthfully. mini-agent leans into that:
 
 - `finish(result="failed")` is a first-class outcome (`TESTS_FAILED` / `model_declared_failure`).
@@ -338,7 +335,7 @@ Three rehearsed paths, each stable across 2 consecutive real-model runs (2026-11
 `deepseek-flash`; full records incl. steps/tokens/exit codes in
 [`fixtures/REHEARSALS.md`](fixtures/REHEARSALS.md)):
 
-1. **`fixtures/tags-repo`** — the the README's own `normalize_tags` bug-fix scenario.
+1. **`fixtures/tags-repo`** — the README's own `normalize_tags` bug-fix scenario.
    Baseline 3 failed / 3 passed → read code+tests → run baseline → fix (`strip` + drop
    empty tags) → 6 passed → verified `SUCCESS`, exit 0. 6 steps both runs,
    ~17.6k tokens.

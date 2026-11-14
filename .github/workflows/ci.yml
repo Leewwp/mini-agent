@@ -2,7 +2,7 @@
 #
 # 设计约束(spec「Testing Decisions」·CI 节):
 # - 无 API key:全测试走 FakeModel(--model fake:<script.json>),不引用任何 secrets;
-#   显式置空 MINI_AGENT_API_KEY,证明无 key 环境亦全绿(读者 clone 即信)。
+#   显式置空 MINI_AGENT_API_KEY,证明无 key 环境亦全绿(任何人 clone 即可复验)。
 # - 无网络出站:测试运行期间不访问任何外部服务;依赖安装走 PyPI 属 runner 常规动作。
 # - Python 3.12:满足 pyproject requires-python ">=3.10",与本地开发/uv.lock 一致。
 # - 包管理选 uv(而非 pip):与本地命令完全一致(uv run …),依赖由 uv.lock 锁定,
