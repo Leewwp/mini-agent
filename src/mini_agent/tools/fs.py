@@ -28,10 +28,11 @@ IGNORED_DIRS = frozenset(
 # 上限(spec 钉死的默认值)
 LIST_MAX_DEPTH = 8
 LIST_MAX_ENTRIES = 500
-READ_MAX_LINES = 2000
-READ_MAX_BYTES = 100 * 1024
 SEARCH_MAX_RESULTS = 50
 BINARY_SNIFF_BYTES = 8192
+# read_file 页内容预算:为页脚留余量,保证「整页 + 页脚」不触发执行器的
+# 8KB 结果裁剪(头尾裁剪会挖洞,对文件内容是错误语义;工单 03)
+READ_PAGE_BYTES = 7 * 1024 + 512
 
 # 默认密钥 deny-list:精确名(无通配符)按全名匹配,含通配符按 fnmatch
 DEFAULT_DENY_PATTERNS = (".env", "*.pem", "id_rsa*")
@@ -202,20 +203,34 @@ class ReadFileTool:
             )
         text = _read_text_file(path)
         lines = text.splitlines(keepends=True)
+        total = len(lines)
         start = (offset or 1) - 1
+        if start >= total:
+            hint = f"(有效 offset 1–{total})" if total else "(文件为空)"
+            raise ToolError(f"offset={offset} 超出文件范围:文件共 {total} 行{hint}")
         selected = lines[start : start + limit] if limit else lines[start:]
-        if len(selected) > READ_MAX_LINES:
+        # 按整行累加字节装页,不切断多字节字符;首行超页预算明确报错,不静默截断
+        first_size = len(selected[0].encode("utf-8"))
+        if first_size > READ_PAGE_BYTES:
             raise ToolError(
-                f"本次读取 {len(selected)} 行,超过单次上限 {READ_MAX_LINES} 行:"
-                "请用 offset/limit 分段读取"
+                f"第 {start + 1} 行长 {first_size} 字节,超过单页上限 {READ_PAGE_BYTES} 字节,"
+                "无法按整行返回(不会静默截断半行);请用 search 定位关键内容,"
+                "或让用户拆分该文件"
             )
-        content = "".join(selected)
-        if len(content.encode("utf-8")) > READ_MAX_BYTES:
-            raise ToolError(
-                f"本次读取 {len(content.encode('utf-8'))} 字节,超过单次上限 100KB:"
-                "请用 offset/limit 分段读取"
-            )
-        self._ctx.read_files.add(path)  # 先读后写标记
+        page: list[str] = []
+        used = 0
+        for line in selected:
+            size = len(line.encode("utf-8"))
+            if page and used + size > READ_PAGE_BYTES:
+                break
+            page.append(line)
+            used += size
+        content = "".join(page)
+        last = start + len(page)
+        if last < total:
+            # 页脚 = 可执行的续读指引:行号范围 / 总行数 / 下一页 offset
+            content += f"\n---\n[第 {start + 1}–{last} 行 / 共 {total} 行;续读 offset={last + 1}]\n"
+        self._ctx.read_files.add(path)  # 先读后写标记(护栏非安全边界,不跟踪覆盖率)
         return content
 
 
