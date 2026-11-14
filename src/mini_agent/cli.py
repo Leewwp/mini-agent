@@ -1,20 +1,26 @@
-"""mini-agent CLI 入口:参数解析、配置装配、Provider 构造与完整循环运行。
+"""mini-agent CLI 入口:模式分发(--task 批处理 / --resume 恢复 / 裸命令 REPL)、
+配置装配、Provider 构造与循环运行。
 
-工单 03 接通完整 Agent 循环;工单 04 起主路径为:
-影子 git 快照(基线)→ 完整循环 → 结束快照对账 → 五要素终报(所有终态,
-含 ERROR/TIMEOUT/中断,写 session 目录 report.md + diffs/ 并终端打印)。
+批处理主路径(工单 03/04,行为不变):影子 git 快照(基线)→ 完整循环 →
+结束快照对账 → 五要素终报(所有终态,含 ERROR/TIMEOUT/中断,写 session 目录
+report.md + diffs/ 并终端打印)。
+
+REPL 主路径(工单 12 / 设计票 08):裸命令进入行内滚动会话;--task 存在 →
+批处理(与今天完全一致);--resume <dir> → 恢复会话进 REPL;--task 与
+--resume 互斥(exit 5);--repo 省略时取 git 根(失败回退 cwd)。
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
-from mini_agent.errors import EXIT_CONFIG_ERROR, ConfigError
+from mini_agent.errors import EXIT_CONFIG_ERROR, EXIT_ERROR, ConfigError
 from mini_agent.executor import ToolExecutor
 from mini_agent.loop import SYSTEM_PROMPT, AgentLoop
 from mini_agent.providers import (
@@ -49,7 +55,7 @@ class Config:
     """一次运行的全部配置(CLI flag > 环境变量 > 默认值)。"""
 
     repo: Path
-    task: str
+    task: str | None  # 批处理任务;REPL 模式为 None
     model: str
     base_url: str
     api_key: str | None
@@ -61,18 +67,38 @@ class Config:
     tool_desc_lang: str = DEFAULT_TOOL_DESC_LANG
     temperature: float = DEFAULT_TEMPERATURE
     max_tokens: int = DEFAULT_MAX_TOKENS
+    runs_dir: str | None = None  # REPL 会话根目录覆盖(--runs-dir)
+    verbose: bool = False  # REPL 工具结果行完整输出(--verbose)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mini-agent",
-        description="本地 CLI 编码 Agent:输入仓库路径与自然语言任务,自主读码、改码、跑测试并汇报结果。",
+        description="本地 CLI 编码 Agent:批处理自主完成编码任务,或裸命令进入交互式 REPL。",
     )
-    parser.add_argument("--repo", required=True, help="目标仓库路径")
-    parser.add_argument("--task", required=True, help="自然语言任务描述")
+    parser.add_argument(
+        "--repo", default=None,
+        help="目标仓库路径(省略时取 git 根,非 git 目录用当前目录)",
+    )
+    parser.add_argument(
+        "--task", default=None,
+        help="自然语言任务描述;给出即进入批处理模式,省略进入交互式 REPL",
+    )
+    parser.add_argument(
+        "--resume", nargs="?", const="", default=None, metavar="SESSION_DIR",
+        help="恢复指定会话目录并进入 REPL(与 --task 互斥);不带值时列出该仓库最近 3 个会话后退出",
+    )
+    parser.add_argument(
+        "--runs-dir", default=None,
+        help="REPL 会话根目录(默认 ~/.mini-agent/sessions;批处理不受影响)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="REPL 工具结果行显示完整输出(默认摘要行)",
+    )
     parser.add_argument(
         "--max-steps", type=int, default=DEFAULT_MAX_STEPS,
-        help="最大步数(一次 LLM 往返计 1 步,默认 20)",
+        help="最大步数(一次 LLM 往返计 1 步,默认 20;REPL 中为每轮预算)",
     )
     parser.add_argument(
         "--test-cmd", default=None,
@@ -84,7 +110,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,
-        help="整体超时秒数(默认 600)",
+        help="整体超时秒数(默认 600;REPL 中为每轮预算)",
     )
     parser.add_argument(
         "--max-context-tokens", type=int, default=DEFAULT_MAX_CONTEXT_TOKENS,
@@ -97,10 +123,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def detect_git_root(start: Path | None = None) -> Path | None:
+    """从 start(默认 cwd)探测 git 仓库根(``git rev-parse --show-toplevel``)。"""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(start if start is not None else Path.cwd()),
+             "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    root = proc.stdout.strip()
+    return Path(root) if root else None
+
+
+def resolve_repo(args: argparse.Namespace) -> Path:
+    """--repo 显式给出永远优先;省略时 git 根,非 git 目录回退 cwd。"""
+    if args.repo is not None:
+        return Path(args.repo)
+    return detect_git_root() or Path.cwd()
+
+
 def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
     """装配配置:校验 --repo、解析模型三件套(MINI_AGENT_API_KEY / _BASE_URL / _MODEL)。"""
     env = env if env is not None else os.environ
-    repo = Path(args.repo)
+    repo = resolve_repo(args)
     if not repo.is_dir():
         raise ConfigError(f"--repo 路径不存在或不是目录:{args.repo}")
     if args.max_steps < 1:
@@ -133,6 +182,8 @@ def resolve_config(args: argparse.Namespace, env: dict | None = None) -> Config:
         max_context_tokens=args.max_context_tokens,
         thinking=args.thinking,
         tool_desc_lang=tool_desc_lang,
+        runs_dir=getattr(args, "runs_dir", None),
+        verbose=getattr(args, "verbose", False),
     )
 
 
@@ -230,9 +281,108 @@ def run(config: Config, provider) -> int:
         return outcome.exit_code
 
 
+def run_repl(
+    config: Config,
+    provider,
+    *,
+    resume_messages: list[dict] | None = None,
+    resumed_from: str | None = None,
+    stdin=None,
+    stdout=None,
+) -> int:
+    """交互式 REPL 主路径(工单 12 / 设计票 08 装配)。
+
+    - TTY:prompt_toolkit 输入框 + spinner + patch_stdout;非 TTY(测试/管道):
+      纯文本输入、无 spinner、无 patch_stdout(渲染层自动降级);
+    - 退出码:/exit(含 Ctrl+D/双击 Ctrl+C)→ 0;未捕获异常 → 3 并出会话级报告。
+    """
+    from mini_agent.repl.app import ReplApp
+    from mini_agent.repl.orchestrator import ChatSession
+    from mini_agent.repl.prompt import make_plain_input
+
+    input_stream = stdin if stdin is not None else sys.stdin
+    output = stdout if stdout is not None else sys.stdout
+    session = ChatSession(
+        config=config,
+        provider=provider,
+        output=output,
+        runs_dir=Path(config.runs_dir) if config.runs_dir else None,
+        resume_messages=resume_messages,
+        resumed_from=resumed_from,
+    )
+    interactive = bool(input_stream.isatty() and output.isatty())
+    if interactive:
+        from mini_agent.repl.prompt import PROMPT_TEXT, build_prompt_session
+        from mini_agent.repl.waiting import WaitingSpinner
+
+        prompt_session = build_prompt_session()
+
+        def input_fn() -> str:
+            return prompt_session.prompt(PROMPT_TEXT)
+
+        def spinner_factory(text: str):
+            return WaitingSpinner(text)
+
+        patch_stdout_flag = True
+    else:
+        input_fn = make_plain_input(input_stream)
+        spinner_factory = None
+        patch_stdout_flag = False
+    banner = (
+        f"mini-agent 交互会话 · 模型 {config.model} · 仓库 {config.repo.name}\n"
+        "直接输入消息开始对话;/help 查看命令;Ctrl+D 或双击 Ctrl+C 退出并生成会话终报"
+    )
+    app = ReplApp(
+        run_turn_fn=session.turn,
+        output=output,
+        input_fn=input_fn,
+        spinner_factory=spinner_factory,
+        verbose=config.verbose,
+        show_reasoning=config.thinking,
+        on_new=session.new_session,
+        on_compact=session.compact,  # /compact(工单 13):spinner/中断反馈由 ReplApp 管
+        on_exit=session.finish,
+        banner=banner,
+        patch_stdout=patch_stdout_flag,
+    )
+    try:
+        return app.run()
+    except Exception as exc:  # noqa: BLE001 —— 防御:异常退出也出会话级报告
+        traceback.print_exc()
+        session.finish_error(exc)
+        return EXIT_ERROR
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    # 模式分发(设计票 08 Answer 1):--task → 批处理;--resume → 恢复;裸命令 → REPL
+    if args.task is not None and args.resume is not None:
+        print(
+            "[配置错误] --task(批处理)与 --resume(恢复会话)不能同时使用", file=sys.stderr
+        )
+        return EXIT_CONFIG_ERROR
+    if args.resume == "":  # --resume 无参:非交互列出该 repo 最近会话后退出(设计票 06)
+        from mini_agent.resume import list_recent_sessions, render_session_list
+
+        repo = resolve_repo(args)
+        print(render_session_list(list_recent_sessions(
+            repo, runs_dir=Path(args.runs_dir) if args.runs_dir else None,
+        )))
+        return 0
     try:
+        resume_messages = None
+        resumed_from = None
+        if args.resume is not None:
+            from mini_agent.resume import load_resume_messages, resolve_resume_repo
+
+            session_repo = resolve_resume_repo(Path(args.resume), explicit_repo=args.repo)
+            if args.repo is None and session_repo is not None:
+                args.repo = session_repo  # --repo 省略时用 session_meta.repo
+            warnings: list[str] = []
+            resume_messages = load_resume_messages(Path(args.resume), warn=warnings.append)
+            resumed_from = str(Path(args.resume).resolve())
+            for message in warnings:
+                print(f"[会话恢复] {message}")
         config = resolve_config(args)
         provider = create_provider(
             config.model,
@@ -245,7 +395,11 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"[配置错误] {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
-    return run(config, provider)
+    if args.task is not None:
+        return run(config, provider)  # 批处理:行为与今天完全一致
+    return run_repl(
+        config, provider, resume_messages=resume_messages, resumed_from=resumed_from
+    )
 
 
 if __name__ == "__main__":

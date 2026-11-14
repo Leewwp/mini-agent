@@ -6,22 +6,42 @@
 
 # mini-agent
 
-A minimal, self-built coding agent for the terminal. Point it at a repository path and a
-natural-language task; it autonomously reads the code, edits files, runs your pre-configured
-test command, feeds failures back into the conversation, and keeps fixing until the tests
-pass — or reports honestly that it could not.
+A minimal, self-built coding agent for the terminal — now with an interactive REPL as the
+primary way to use it. Point it at a repository and either start a continuous chat session
+(bare `mini-agent`) or hand it a one-shot task (`--task`); it autonomously reads the code,
+edits files, runs your pre-configured test command, feeds failures back into the
+conversation, and keeps fixing until the tests pass — or reports honestly that it could not.
+
+```bash
+# one-shot batch run (core scenario — unchanged)
+mini-agent --repo /tmp/tags-repo-demo --task "修复 normalize_tags…" --test-cmd "pytest -q"
+
+# or: interactive REPL session (primary usage — continuous chat, tools visible)
+mini-agent --repo /tmp/tags-repo-demo --test-cmd "pytest -q"
+```
 
 This is an self-built coding agent. The point of the project is that the four things an
 agent must explain — **the task loop, the tool-execution boundary, the stopping conditions,
 and the result judgment** — are implemented from scratch in this repository
 (`src/mini_agent/loop.py` and friends). It is *not* a wrapper around an existing coding
-agent (Claude Code, Codex CLI, …): the only SDK in the dependency tree is the plain
-`openai` client, used as a dumb OpenAI-compatible transport.
+agent (Claude Code, Codex CLI, …): the only SDKs in the dependency tree are the plain
+`openai` client (dumb OpenAI-compatible transport) and `prompt_toolkit` (REPL input box).
 
 - Self-written agent loop: streaming output, one LLM round-trip = one step, at most 8 tool
-  calls per turn, stall detection (`model_stalled`).
+  calls per turn, stall detection (`model_stalled`); turn-scoped variant for the REPL
+  (`run_turn()` / `TurnState`, batch path untouched).
 - 7 tools: `list_files` / `read_file` / `write_file` / `search` / `run_command` /
   `run_tests` / `finish`.
+- **Interactive REPL**: inline-scrolling Claude Code-style session — streaming replies,
+  colored tool-result lines, spinner, `/help` `/new` `/compact` `/exit` slash commands,
+  per-turn status lines, double-Ctrl+C to exit.
+- **Project memory**: repo-root `AGENTS.md` injected into the system prompt (REPL-only,
+  32KiB cap, append-don't-overwrite guidance).
+- **Manual compaction**: `/compact` replaces old history with an LLM semantic summary +
+  the last 2 complete turns; any failure leaves history untouched. Mechanical auto-trim
+  remains as a safety valve.
+- **Session resume**: `mini-agent --resume <session-dir>` continues a previous
+  conversation in a new session directory (old log read-only).
 - Guards that are honest about being guards: a path fence, a short command blacklist plus
   an interpreter/build allowlist, and a minimized subprocess environment — threat model is
   "prevent accidents, not adversaries" (see [DESIGN.md](DESIGN.md#7-security-boundary--threat-model)).
@@ -30,9 +50,11 @@ agent (Claude Code, Codex CLI, …): the only SDK in the dependency tree is the 
 - Verify-on-finish: `finish(result="success")` is only believed after the test command is
   re-run right then and passes.
 - Append-only JSONL session log (`session.jsonl`) recording model conditions, every LLM
-  request/response, every tool call/result, test runs, context trims, and the final report.
+  request/response, every tool call/result, test runs, context trims, compactions, and the
+  final report.
 - Test suite runs with **no API key and no network** (FakeModel injected via
-  `--model fake:<script.json>`).
+  `--model fake:<script.json>`); REPL tests are fully injectable (StringIO/scripted input)
+  and never need a TTY.
 
 The CLI conversation layer (prompts, tool descriptions, terminal output) is in Chinese by
 design — this matches the original the project's demo requirements.
@@ -107,11 +129,64 @@ uv venv && uv pip install -e ".[dev]"
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-export MINI_AGENT_API_KEY=sk-...   # DeepSeek by default; see "Model configuration"
+export MINI_AGENT_API_KEY=sk-...   # required for the REPL too (fail-fast exit 5 without it;
+                                   # --model fake: works with no key). See "Model configuration".
 ```
 
-Run it against a **temporary copy** of a fixture repo (never the fixture itself — the agent
-really writes into `--repo` and does not roll back):
+### Interactive REPL (primary usage)
+
+Run against a **temporary copy** of a fixture repo (never the fixture itself — the agent
+really writes into `--repo` and does not roll back). Bare `mini-agent` (no `--task`) starts
+the session; `--repo` defaults to the git root of your current directory:
+
+```bash
+cp -r fixtures/tags-repo /tmp/tags-repo-demo
+cd /tmp/tags-repo-demo
+uv run --project /path/to/mini-agent mini-agent --test-cmd "pytest -q"
+```
+
+You get a chat: type messages (Enter sends; Esc+Enter inserts a newline), watch tool calls
+happen with visible results, and use slash commands:
+
+| Command | Meaning |
+|---|---|
+| `/help` | show the command table |
+| `/new` (alias `/clear`) | start a fresh session: clear history, reload `AGENTS.md`, rotate log & snapshot |
+| `/compact [focus]` | compact the conversation into a semantic summary + the last 2 turns |
+| `/exit` | write the session report (`report.md` + diff evidence) and exit (also Ctrl+D or double Ctrl+C within 2s) |
+
+What a REPL session looks like (real `deepseek-flash` run; see [Demos](#demos) for the
+recorded cast):
+
+```
+❯ 修复 normalize_tags 对空白和空标签的处理,跑测试验证
+· [步骤 1] 调用工具 read_file
+✓ read_file · def normalize_tags(raw): · 3ms
+…(模型继续读测试、改代码)…
+✓ run_tests · 退出码 0 · 842ms
+✓ 完成 · 6 步 · 17.6k tok
+模型声明:修复了 normalize_tags:strip + 丢弃空标签,6 个用例通过
+❯ /exit
+================ 会话终报 ================
+会话状态:正常退出;轮次 1;总步数 6;模型 deepseek-flash
+token 用量:prompt 17070 / completion 573 / total 17643
+修改文件(1):  tags_utils/normalize.py(修改,+9/-3)
+…
+```
+
+REPL sessions live under `~/.mini-agent/sessions/<repo-slug>/` (override with
+`--runs-dir`); each `session.jsonl` is append-only and supports `--resume`:
+
+```bash
+mini-agent --resume            # list the 3 most recent sessions for this repo
+mini-agent --resume <dir>      # continue one in a NEW session directory (old log untouched)
+```
+
+If the repo has an `AGENTS.md` at its root, its content (≤32KiB) is injected into the
+system prompt as project instructions, and `/new` reloads it. Batch mode (`--task`) is
+deliberately unaffected by memory injection.
+
+### One-shot batch (core scenario)
 
 ```bash
 cp -r fixtures/tags-repo /tmp/tags-repo-demo
@@ -132,6 +207,9 @@ cp -r fixtures/tags-repo /tmp/tags-repo-demo
 uv run mini-agent --repo /tmp/tags-repo-demo \
   --task "修复 normalize_tags 对空白和空标签的处理,运行测试验证" \
   --test-cmd "pytest -q" \
+  --model fake:examples/fix-cycle.json
+# REPL offline too (pipe input; /exit at the end):
+printf '看看仓库结构\n/exit\n' | uv run mini-agent --repo /tmp/tags-repo-demo \
   --model fake:examples/fix-cycle.json
 ```
 
@@ -158,29 +236,44 @@ raw.split(","),未处理空白与空标签。……修复后 6 个用例全部�
 ## CLI reference
 
 ```
-mini-agent --repo <path> --task <text> [--max-steps N] [--test-cmd CMD] [--model NAME]
+mini-agent [--repo <path>] [--task <text>] [--resume [SESSION_DIR]] [--runs-dir DIR]
+           [--verbose] [--max-steps N] [--test-cmd CMD] [--model NAME]
            [--timeout SECONDS] [--max-context-tokens N] [--thinking]
 ```
 
+Mode dispatch: `--task` → one-shot batch (unchanged); `--resume <dir>` → resume a session
+into the REPL; bare command → interactive REPL. `--task` and `--resume` are mutually
+exclusive (exit 5).
+
 | Flag | Default | Meaning |
 |---|---|---|
-| `--repo` | *(required)* | Target repository directory. The agent really writes here; changes are never auto-rolled back. |
-| `--task` | *(required)* | Natural-language task (Chinese works best). |
-| `--max-steps` | `20` | Step budget. One LLM round-trip counts as one step. |
+| `--repo` | git root of cwd, else cwd | Target repository directory (explicit flag always wins). The agent really writes here; changes are never auto-rolled back. |
+| `--task` | none | Natural-language task (Chinese works best). Present → batch mode. |
+| `--resume` | none | Session directory to resume (new dir is written, old log read-only). Bare `--resume` lists the 3 most recent sessions for this repo and exits. |
+| `--runs-dir` | `~/.mini-agent/sessions` | REPL session root (batch keeps `./mini-agent-runs` + temp fallback). |
+| `--verbose` | off | REPL tool-result lines show full output instead of the summary line. |
+| `--max-steps` | `20` | Step budget. One LLM round-trip counts as one step. Per-turn in the REPL. |
 | `--test-cmd` | none | The repository's pre-configured test command (e.g. `pytest -q`). Without it, success cannot be verified (→ `UNVERIFIED`). |
 | `--model` | `deepseek-flash` | Model name, or `fake:<script.json>` to inject the scripted FakeModel (no key, no network). |
-| `--timeout` | `600` | Overall deadline in seconds. |
+| `--timeout` | `600` | Overall deadline in seconds. Per-turn in the REPL. |
 | `--max-context-tokens` | `60000` | History-trim threshold, in tokens (triggered by the previous response's `usage.prompt_tokens`). |
-| `--thinking` | off | Enable model thinking mode. Reasoning is displayed (stderr) only — it never enters the message history. |
+| `--thinking` | off | Enable model thinking mode. Reasoning is displayed (stderr, dimmed in REPL) only — it never enters the message history. |
+
+REPL exit codes: `/exit` (incl. Ctrl+D / double Ctrl+C) → 0 even if the last turn failed;
+config errors (no API key, bad `--resume`, conflicting flags) → 5; unexpected internal
+errors → 3 with a session report. Batch exit codes: see the table below.
 
 Model configuration via environment (precedence: flag > env > default):
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `MINI_AGENT_API_KEY` | — | API key. Required unless `--model fake:` is used. |
+| `MINI_AGENT_API_KEY` | — | API key. Required in both batch and REPL unless `--model fake:` is used (REPL fails fast with exit 5). |
 | `MINI_AGENT_BASE_URL` | `https://api.deepseek.com` | Any OpenAI-compatible endpoint (DeepSeek verified; Zhipu/MiniMax best-effort). |
 | `MINI_AGENT_MODEL` | `deepseek-flash` | Model name override. |
 | `MINI_AGENT_TOOL_DESC_LANG` | `zh` | Tool-description language: `zh` (default) or `en` (hot backup). Swaps only the seven tool descriptions — behavior and parameter schemas unchanged; the language in use is recorded in `session_meta`. |
+
+Runtime dependencies: `openai` (Apache-2.0) and `prompt_toolkit` (BSD-3-Clause; REPL input
+box). Third-party code reuse and licenses: [NOTICE](NOTICE).
 
 Other request defaults (from `cli.py`): `temperature=0.0`, `max_tokens=8192`, streaming
 always on, `stream_options.include_usage=true` (token usage falls back to an estimate,
@@ -255,11 +348,12 @@ Three rehearsed paths, each stable across 2 consecutive real-model runs (2026-11
 
 ### Recorded demos (asciinema)
 
-Two terminal recordings of real `deepseek-flash` runs (2026-11-12), each against a
-temporary `/tmp` copy of a fixture — never the fixture itself, and nothing is uploaded
-anywhere: the `.cast` files are committed under [`docs/demos/`](docs/demos/).
+Three terminal recordings of real `deepseek-flash` runs, each against a temporary `/tmp`
+copy of a fixture — never the fixture itself, and nothing is uploaded anywhere: the `.cast`
+files are committed under [`docs/demos/`](docs/demos/).
 
 ```bash
+asciinema play docs/demos/repl-session.cast        # REPL: multi-turn chat + tool results + /compact + /exit report
 asciinema play docs/demos/tags-repo-success.cast   # demo 1: fix normalize_tags → SUCCESS (6 steps)
 asciinema play docs/demos/honest-failure.cast      # demo 3: impossible task → honest TESTS_FAILED
 ```
@@ -269,23 +363,26 @@ asciinema play docs/demos/honest-failure.cast      # demo 3: impossible task →
 
 ## Observability
 
-Every run writes `mini-agent-runs/<YYYYmmdd-HHMMSS>-<suffix>/session.jsonl` next to your
-working directory (moved to the system temp dir if that would land inside `--repo`). The
+Every batch run writes `mini-agent-runs/<YYYYmmdd-HHMMSS>-<suffix>/session.jsonl` next to
+your working directory (moved to the system temp dir if that would land inside `--repo`);
+REPL sessions live under `~/.mini-agent/sessions/<repo-slug>/…/session.jsonl`. The
 log is append-only and flushed after every event — killing the process still leaves a
 readable log. It never contains the API key or request headers. Event types:
 
 `session_meta`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `test_run`,
-`context_trim`, `final_report`
+`context_trim`, `final_report`, plus REPL-only `turn_start` / `turn_result` / `turn_end`
+(full model view at turn end — the resume data source), `memory_loaded`,
+`compact_request` / `compact_response` / `compact`
 
 Notable details: `llm_request` stores the actual messages sent (that is what context
 reconstruction needs); `test_run` stores full stdout/stderr while the model sees a clipped
-version; `context_trim` stores the removed messages verbatim, so trimming is reversible
-from the log alone.
+version; `context_trim` stores the removed messages verbatim; `compact` stores the replaced
+messages verbatim — trimming and compaction are both reversible from the log alone.
 
 ## Testing
 
 ```bash
-uv run --extra dev pytest -q   # 217 tests; no API key, no network
+uv run --extra dev pytest -q   # 323 tests; no API key, no network, no TTY
 ```
 
 The only test seam is the Provider boundary: a scripted FakeModel streams chunks shaped
@@ -304,22 +401,25 @@ report — is the production code under test.
 
 ```
 ├── README.md / README.zh-CN.md   # this file + Chinese twin (top-of-file switch links)
-├── DESIGN.md                     # design rationale: the four elements, cuts, V2 seams
+├── DESIGN.md                     # design rationale: the four elements, cuts, seams, REPL, memory & compaction
 ├── AI-USAGE.md                   # honest disclosure of AI usage in building this project
-├── GLOSSARY.md                   # bilingual glossary of the seven core terms
+├── GLOSSARY.md                   # bilingual glossary (core 7 terms + REPL terms)
+├── NOTICE                        # third-party code reuse & licenses (aider Apache-2.0 etc.)
 ├── LICENSE                       # MIT
-├── pyproject.toml                # hatchling; console script `mini-agent`; deps: openai
+├── pyproject.toml                # hatchling; console script `mini-agent`; deps: openai, prompt_toolkit
 ├── src/mini_agent/               # cli / providers / loop / executor / tools / session / sandbox
-├── tests/                        # FakeModel-driven pytest suite (no key, no network)
+│   └── repl/                     # REPL: app / render / prompt / waiting / orchestrator / compact
+│   └── memory.py / resume.py     # AGENTS.md project memory; session resume
+├── tests/                        # FakeModel-driven pytest suite (no key, no network, no TTY)
 ├── fixtures/                     # tags-repo / algo-repo demo repos + REHEARSALS.md records
-├── examples/                     # fix-cycle.json: scripted FakeModel replay of the fix loop
-├── docs/demos/                   # asciinema recordings (success + honest failure)
+├── examples/                     # fix-cycle.json + repl-demo.sh (recorded-demo rehearsal script)
+├── docs/demos/                   # asciinema recordings (REPL + batch success + honest failure)
 └── .github/workflows/            # ci.yml: ruff + pytest (single job, no key, no network)
 ```
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Leewwp.
+[MIT](LICENSE) — Copyright (c) 2026 Leewwp. Third-party notices: [NOTICE](NOTICE).
 
 ## See also
 
