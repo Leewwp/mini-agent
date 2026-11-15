@@ -386,7 +386,7 @@ messages verbatim — trimming and compaction are both reversible from the log a
 ## Testing
 
 ```bash
-uv run --extra dev pytest -q   # 345 tests; no API key, no network, no TTY
+uv run --extra dev pytest -q   # 358 tests; no API key, no network, no TTY
 ```
 
 The only test seam is the Provider boundary: a scripted FakeModel streams chunks shaped

@@ -358,7 +358,7 @@ API key 与请求头。事件类型:批处理八类,
 ## 测试
 
 ```bash
-uv run --extra dev pytest -q   # 345 个测试;无 key、无网络、无 TTY
+uv run --extra dev pytest -q   # 358 个测试;无 key、无网络、无 TTY
 ```
 
 唯一测试接缝在 Provider 边界:脚本化 FakeModel 按真实 DeepSeek 流式分片规律吐
