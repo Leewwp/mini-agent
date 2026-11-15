@@ -49,7 +49,8 @@ MINI_AGENT_API_KEY=sk-... uv run mini-agent \
 | 模块 | 位置 | 职责 |
 |---|---|---|
 | CLI | `src/mini_agent/cli.py` | 参数解析、配置(flag > env > 默认)、装配 |
-| Agent 循环 | `src/mini_agent/loop.py` | 计步、空转检测、终态映射、声明时复验、历史裁剪 |
+| Agent 循环 | `src/mini_agent/loop.py` | 计步、空转检测、预算/卡死提醒、终态映射、声明时复验、历史裁剪 |
+| 卡死检测 | `src/mini_agent/stuck.py` | 同签名三模式 streak 监测(连败 3/冻结 4/成功复跑 3)→一次性纠正性提醒 |
 | Provider | `src/mini_agent/providers.py` | OpenAI 兼容流式客户端、FakeModel、重试分类 |
 | 工具 | `src/mini_agent/tools/` | Tool 协议 + 注册表:`fs.py` / `exec.py` / `finish.py` |
 | 执行器 | `src/mini_agent/executor.py` | 钩子链、结果截断(≤8KB 保头尾)、日志事件 |
